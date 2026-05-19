@@ -2,6 +2,10 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v5.1.15
+
+- 修复 Ubuntu 22.04 Notebook 的 OpenSSH 安装源选择。
+
 ## v5.1.14
 
 - 改善 Ubuntu 22.04 Notebook 的 OpenSSH 兼容性。
