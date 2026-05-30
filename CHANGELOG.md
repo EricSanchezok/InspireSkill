@@ -2,6 +2,10 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v5.2.3
+
+- 修复 Antigravity Skill 安装目录迁移和遗留目录清理。
+
 ## v5.2.2
 
 - 新增 Antigravity 与 Cursor 安装支持。
