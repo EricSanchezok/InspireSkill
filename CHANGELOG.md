@@ -2,6 +2,10 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v5.2.4
+
+- 更新摘要在 GitHub Releases 不可用时，回退读取发布包内的 CHANGELOG。
+
 ## v5.2.3
 
 - 修复 Antigravity Skill 安装目录迁移和遗留目录清理。
