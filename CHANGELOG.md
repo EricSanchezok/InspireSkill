@@ -2,6 +2,11 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v5.2.5
+
+- 修复跨工作区 Job 列表的活动状态过滤。
+- 优化 Job、Notebook 与 Project 查询速度和命令退出。
+
 ## v5.2.4
 
 - 更新摘要在 GitHub Releases 不可用时，回退读取发布包内的 CHANGELOG。
