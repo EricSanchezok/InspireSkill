@@ -2,6 +2,13 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v6.0.0
+
+- **兼容性变化：**删除旧 OpenAPI 客户端及其配置入口，平台操作统一使用 Browser API。
+- **兼容性变化：**移除旧 `notebook ssh` 管理子命令；日常 SSH 使用 `notebook ssh <name>`，连接管理使用 `notebook connection`。
+- Job 支持 `--exclude-node`，Notebook 创建支持 `--node`。
+- Job 与 HPC 的主要操作迁移至 Browser API v2。
+
 ## v5.2.5
 
 - 修复跨工作区 Job 列表的活动状态过滤。
