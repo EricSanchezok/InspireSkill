@@ -2,6 +2,12 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v6.1.0
+
+- Notebook 新增 JupyterTerminal 执行、交互 Shell 与依赖安装通道。
+- 按 Notebook 网络能力选择可用传输方式。
+- 新增网络检查入口与共享存储文件传输指引。
+
 ## v6.0.6
 
 - 新增 Kimi Code 安装支持，并遵循 `KIMI_CODE_HOME`。
