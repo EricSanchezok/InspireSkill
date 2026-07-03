@@ -2,6 +2,12 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v6.1.1
+
+- 新增 `notebook shell --check` 检查 Shell 通道。
+- JupyterTerminal 执行输出去除启动横幅与命令回显。
+- `notebook start --wait` 显示当前状态和最近事件。
+
 ## v6.1.0
 
 - Notebook 新增 JupyterTerminal 执行、交互 Shell 与依赖安装通道。
