@@ -2,6 +2,12 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v6.1.2
+
+- 修复 Job 创建与批处理中的 `--exclude-node` 参数传递。
+- 改善计算组与 Quota 的匹配说明和错误提示。
+- 补充 Notebook 自动停止与平台回收策略的区别。
+
 ## v6.1.1
 
 - 新增 `notebook shell --check` 检查 Shell 通道。
