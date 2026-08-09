@@ -2,6 +2,12 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v7.0.1
+
+- 新增 `inspire uninstall` 和安装脚本的 `--uninstall` 入口。
+- 默认移除工具拥有的安装内容；`--purge` 可清理账号数据，`--purge-runtime` 可进一步清理运行时。
+- 修复安装完成提示的换行。
+
 ## v7.0.0
 
 - **兼容性变化：**删除 `notebook url`、`notebook vscode`；`notebook proxy-url` 改为打印地址。
