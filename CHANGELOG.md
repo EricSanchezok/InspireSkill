@@ -2,6 +2,15 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v7.0.0
+
+- **兼容性变化：**删除 `notebook url`、`notebook vscode`；`notebook proxy-url` 改为打印地址。
+- **兼容性变化：**删除 `user` 命令组，权限查询改用 `account permissions`；移除旧用户配额与密钥查询入口。
+- 恢复 `inspire update` 的进度和版本摘要输出。
+- 将主要平台操作迁移至 Browser API v2。
+- Notebook 执行和 Shell 减少浏览器依赖，改善网关 URL 解析与并发连接建立。
+- 修复 Serving 启停、HPC 创建与名称解析、镜像解析、Ray 列表字段及普通成员资源查询。
+
 ## v6.3.0
 
 - 新增 Ray 指标及 Serving 事件、实例和启动命令。
