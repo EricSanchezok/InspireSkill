@@ -2,6 +2,12 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v7.0.2
+
+- Notebook 传输方式按实际 GPU 型号判断，并缓存探测结果。
+- `cache status` 与 `cache clear` 新增 `--resource` 过滤。
+- 自动清理名称索引中退役的资源类型。
+
 ## v7.0.1
 
 - 新增 `inspire uninstall` 和安装脚本的 `--uninstall` 入口。
