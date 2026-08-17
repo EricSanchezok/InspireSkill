@@ -2,6 +2,16 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v7.1.1
+
+- 新增 Serving、Ray 和 HPC 的交互式 Shell，支持实例选择。
+- `notebook save-image --flatten` 支持将镜像保存为单层。
+- 工作负载 Quota 显示每小时点券成本；资源用量支持 `--group` 过滤并显示可抢占容量。
+- **兼容性变化：**项目 JSON 的 `remaining_budget` 拆为 `my_remaining_budget` 和 `project_remaining_budget`。
+- **兼容性变化：**`cache refresh` 需指定 `--resource`、`--workspace` 或 `--name` 收窄范围。
+- 修复空配额缓存、模型分页、重复镜像查询、镜像标签显示和节点容量统计。
+- 复用 HTTP 连接，减少重复缓存刷新请求。
+
 ## v7.1.0
 
 - 新增数据集目录、版本、标签、校验与申请状态查询；Notebook、Job 和 HPC 支持挂载数据集。
