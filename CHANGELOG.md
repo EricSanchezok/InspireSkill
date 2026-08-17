@@ -2,6 +2,29 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v7.1.1
+
+- 新增 Serving、Ray 和 HPC 的交互式 Shell，支持实例选择。
+- `notebook save-image --flatten` 支持将镜像保存为单层。
+- 工作负载 Quota 显示每小时点券成本；资源用量支持 `--group` 过滤并显示可抢占容量。
+- **兼容性变化：**项目 JSON 的 `remaining_budget` 拆为 `my_remaining_budget` 和 `project_remaining_budget`。
+- **兼容性变化：**`cache refresh` 需指定 `--resource`、`--workspace` 或 `--name` 收窄范围。
+- 修复空配额缓存、模型分页、重复镜像查询、镜像标签显示和节点容量统计。
+- 复用 HTTP 连接，减少重复缓存刷新请求。
+
+## v7.1.0
+
+- 新增数据集目录、版本、标签、校验与申请状态查询；Notebook、Job 和 HPC 支持挂载数据集。
+- 新增 TensorBoard 生命周期管理及训练曲线读取。
+- 补齐 HPC、Ray、Serving 的日志、实例事件、伸缩与部署观察入口。
+- 新增资源用量归因、回收策略、节点事件和 Notebook 即时指标。
+- 新增 Ray 启动、Serving 伸缩与回滚、模型部署配置与删除、取消镜像保存等操作。
+- 扩展工作负载创建和批处理参数，支持环境变量、保留策略、时长限制及通知。
+- **兼容性变化：**`image save` 改为 `notebook save-image`；删除 `config` 命令组，账号相关操作迁入 `account`。
+- **兼容性变化：**Project 命令移除 `--workspace`；`--workspace all` 限于支持跨工作区发现的命令。
+- **兼容性变化：**事件默认包含工作负载与实例事件；`--workload-level` 可只看工作负载级事件，实例选择使用列表中的标签。
+- 修复 Shell 退出、终态等待、日志排序、镜像名称与可见性解析、配额缓存、HPC 规格校验和限流处理。
+
 ## v7.0.2
 
 - Notebook 传输方式按实际 GPU 型号判断，并缓存探测结果。
