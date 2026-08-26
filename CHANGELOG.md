@@ -2,6 +2,12 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v7.1.4
+
+- 修复 Notebook 删除后重建时，过期名称缓存导致 JupyterTerminal 连接失败。
+- JupyterTerminal WebSocket 遵循系统代理的 `NO_PROXY` 设置。
+- 恢复 HPC Shell 的默认与显式实例连接。
+
 ## v7.1.3
 
 - 名称缓存改为按需读取与更新，减少普通命令的后台请求。
