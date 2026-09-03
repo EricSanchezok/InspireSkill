@@ -2,6 +2,14 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v7.1.6
+
+- `resources availability` 合并配额余额、实时用量与空闲或可回收整节点容量。
+- **兼容性变化：**删除 `resources nodes`，改用 `resources availability`。
+- **兼容性变化：**`resources usage` 删除 `--by`，默认按 Project → User 汇总；使用 `--details` 查看任务，并支持 `--project`、`--user`、`--task` 过滤。
+- 多节点 Job 要求每节点使用 8 GPU 满节点规格；`--nodes` 指定节点数。
+- 修复资源分页、节点状态判断与事件时间线过滤。
+
 ## v7.1.5
 
 - **兼容性变化：**移除仓库级配置、路径别名和工作负载 Profile；`inspire init` 只处理账号配置。
