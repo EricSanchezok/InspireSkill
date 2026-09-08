@@ -2,6 +2,13 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v7.1.8
+
+- Serving 列表与详情显示完整 Endpoint；新增 `serving api` 生成调用说明和 curl 示例。
+- 新增 `account api-key list/create/export/run/delete`，支持推理密钥管理、文件导出和子进程环境注入。
+- 密钥导出支持 Shell、PowerShell、dotenv 和原始格式，使用私有文件权限且不覆盖已有文件。
+- 修复长服务地址显示和并发镜像查询的稳定性问题。
+
 ## v7.1.7
 
 - 各命令统一支持 `--account <name>` 单次账号选择，并行命令保持各自账号上下文。
