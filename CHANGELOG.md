@@ -2,6 +2,13 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v7.1.10
+
+- 新增 ZCode Skill 安装与自动检测支持。
+- Kimi Desktop 的安装参数改为 `--harness kimi-work`，已有安装位置不变。
+- Python SDK 转为正式可用，同步与异步 API 延续 v7.1.9。
+- 整理安装、账号、代理、Windows、更新与卸载指引。
+
 ## v7.1.9
 
 - 新增实验性 Python SDK，提供同步与异步客户端、类型化资源、工作负载管理、远程执行和 Notebook 文件传输。
