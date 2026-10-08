@@ -2,6 +2,12 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v7.1.11
+
+- 新增 Pi Skill 安装、更新与卸载支持。
+- Pi 安装位置遵循 `PI_CODING_AGENT_DIR`，支持自定义目录和路径展开。
+- 改善 Windows 上的 SDK 并发测试稳定性。
+
 ## v7.1.10
 
 - 新增 ZCode Skill 安装与自动检测支持。
