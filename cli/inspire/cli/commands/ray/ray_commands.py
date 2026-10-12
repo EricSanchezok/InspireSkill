@@ -1466,10 +1466,10 @@ def shell_ray(
             workspace=workspace,
             limit=200,
             pick=pick,
-            operation=lambda resolved_id: (
+            operation=lambda resolved_id, live_session: (
                 resolved_id,
                 _fetch_ray_instances(
-                    resolved_id, limit=200, session=session, show_all=True
+                    resolved_id, limit=200, session=live_session, show_all=True
                 )[0],
             ),
         )
@@ -1479,7 +1479,12 @@ def shell_ray(
             for row in instances
             if "run" in str(row.get("status") or row.get("instance_status") or "").lower()
         ]
-        views = ray_instance_views(running)
+        # Keep the labels shown by `instances`, including duplicate roles.
+        running_handles = {view.handle for view in ray_instance_views(running)}
+        views = [
+            view for view in ray_instance_views(instances)
+            if view.handle in running_handles
+        ]
         if not views:
             _handle_error(
                 ctx,
