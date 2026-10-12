@@ -2,6 +2,12 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v7.1.12
+
+- 修复 Serving 与 Ray 的交互式 Shell 连接失败。
+- Serving、Ray 和 HPC 的实例选择与实例列表标签保持一致。
+- Serving Shell 支持从完整分页列表中选择运行实例。
+
 ## v7.1.11
 
 - 新增 Pi Skill 安装、更新与卸载支持。
