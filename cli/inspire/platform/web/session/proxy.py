@@ -169,9 +169,22 @@ def _resolve_requests_proxy_config_with_toml(
     return {}, "none"
 
 
+def _socks_remote_dns(value: str) -> str:
+    # urllib3 resolves hostnames locally for socks5://; socks5h:// lets the
+    # proxy resolve them, matching httpx and VPN-only platform hostnames.
+    scheme, sep, rest = value.partition("://")
+    if sep and scheme.lower() == "socks5":
+        return f"socks5h://{rest}"
+    return value
+
+
 def resolve_requests_proxy_config(account: str | None = None) -> tuple[dict[str, str], str]:
     _, toml_values = _load_proxy_toml_values(account)
-    return _resolve_requests_proxy_config_with_toml(toml_values)
+    proxies, source = _resolve_requests_proxy_config_with_toml(toml_values)
+    if source == "system_env":
+        # Requests reads the environment itself here; keep its standard semantics.
+        return proxies, source
+    return {key: _socks_remote_dns(value) for key, value in proxies.items()}, source
 
 
 def _resolve_playwright_proxy_config_with_toml(

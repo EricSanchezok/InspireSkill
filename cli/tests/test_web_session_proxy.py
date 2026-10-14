@@ -161,6 +161,40 @@ def test_resolve_requests_proxy_config_prefers_toml(monkeypatch: pytest.MonkeyPa
     }
 
 
+def test_resolve_requests_proxy_config_uses_remote_dns_for_socks5(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = config_module.Config(
+        username="",
+        password="",
+        base_url="https://qz.sii.edu.cn",
+        requests_http_proxy="SOCKS5://127.0.0.1:1080",
+        requests_https_proxy="socks5://127.0.0.1:1081",
+    )
+    monkeypatch.setattr(
+        config_module.Config,
+        "from_files_and_env",
+        classmethod(lambda cls, **kwargs: (cfg, {})),
+    )
+
+    proxies, source = resolve_requests_proxy_config()
+    assert source == "toml"
+    assert proxies == {
+        "http": "socks5h://127.0.0.1:1080",
+        "https": "socks5h://127.0.0.1:1081",
+    }
+    # Chromium only understands socks5://, so the browser keeps the original URL.
+    assert get_playwright_proxy() == {"server": "socks5://127.0.0.1:1081"}
+
+
+def test_requests_socks_proxy_support_is_installed() -> None:
+    from requests.adapters import HTTPAdapter
+    from urllib3.contrib.socks import SOCKSProxyManager
+
+    manager = HTTPAdapter().proxy_manager_for("socks5h://127.0.0.1:1080")
+    assert isinstance(manager, SOCKSProxyManager)
+
+
 def test_get_rtunnel_proxy_override_uses_toml(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = config_module.Config(
         username="",
