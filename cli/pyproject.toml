@@ -27,7 +27,7 @@ classifiers = [
 ]
 dependencies = [
     "greenlet>=3.1.1,<4.0.0",
-    "requests>=2.28.0",
+    "requests[socks]>=2.28.0",
     "httpx[socks]>=0.28.1",
     "urllib3>=2.7.0",
     "idna>=3.15",

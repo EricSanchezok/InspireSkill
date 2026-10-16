@@ -320,6 +320,8 @@ with InspireClient(account="research") as client:
 
 如果使用启智官方提供的 aTrust VPN，可以参考 [Docker-aTrust](https://github.com/realZillionX/Docker-aTrust) 将 aTrust 运行在 Docker 中，取得宿主机上的 SOCKS5 / HTTP 代理端口，再将该端口接入上述分流方案。
 
+账号 proxy 也可以直接写 `socks5://127.0.0.1:<port>`。CLI 的 HTTP 请求会自动改用 `socks5h://`，由代理端解析域名，因此只能在 VPN 内解析的平台域名也能访问；浏览器仍使用原地址。远程 Shell / exec 的 WebSocket 目前只支持 HTTP(S) 代理，需要这些功能时请配置 HTTP 代理端口。
+
 账号 proxy 优先于通用 Shell 代理；未设置账号 proxy 时，`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 及小写变量仍可能影响连接，需要直连时可用 `NO_PROXY=.sii.edu.cn` 绕过通用代理。用 `inspire account check --details` 查看实际代理来源、路由及 `NO_PROXY` 匹配结果。
 
 > 凭据（Host / User / Password）**从实验室或组织管理员获取**，不要提交到任何公开仓库或聊天记录。

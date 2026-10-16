@@ -12,7 +12,7 @@ CLI 与 SDK 工作负载 `.view` 共用状态投影：先清洗状态文本，�
 
 同一个 `inspire-skill` 包提供两个受支持的入口：`InspireClient` 用于同步脚本和同步 worker；`InspireAsyncClient` 用于 asyncio 应用、Agent runtime 和异步 Web 服务，在调用方事件循环执行原生异步 I/O。两者均可从 `inspire` 或 `inspire.sdk` 导入，使用相同的资源模型、引用、异常和平台能力；异步入口的并发与取消边界见下文。
 
-SDK 与 CLI 复用 browser_api、共享 services 和 `inspire.platform.web.transport.Transport`，由同一个 `inspire-skill` 包安装，包含 `httpx[socks]` 和 `greenlet` 运行时依赖，无需额外 SDK 安装选项。源码安装可在 `cli/` 运行 `uv pip install -e .`，应用项目可用 `uv add /path/to/InspireSkill/cli`。
+SDK 与 CLI 复用 browser_api、共享 services 和 `inspire.platform.web.transport.Transport`，由同一个 `inspire-skill` 包安装，包含 `requests[socks]`、`httpx[socks]` 和 `greenlet` 运行时依赖（同步与异步 HTTP 均支持 SOCKS 代理），无需额外 SDK 安装选项。源码安装可在 `cli/` 运行 `uv pip install -e .`，应用项目可用 `uv add /path/to/InspireSkill/cli`。
 
 以下两个完整示例需要已配置的本地账号及可访问的工作区；`login()` 显式建立会话。保存为对应文件后，在 `cli/` 运行 `uv run python sync_example.py my-account "工作区名称"` 或 `uv run python async_example.py my-account "工作区名称"`。
 
