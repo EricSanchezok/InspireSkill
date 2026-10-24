@@ -16,7 +16,7 @@
 #
 # Flags:
 #   --harness codex[,claude,cursor,opencode,zcode,kimi-code,kimi-work,
-#                qoder,qoder-work,antigravity,openclaw,pi]
+#                qoder,qoder-work,antigravity,openclaw,pi,deepseek]
 #                                     explicit harness list (default: auto-detect)
 #   --no-cli                          skip installing the Python package (skill-only)
 #   --no-schedule                     skip the macOS launchd update-check agent
@@ -36,7 +36,7 @@ PACKAGE="inspire-skill"
 DEFAULT_REF="main"
 LAUNCH_LABEL="sh.inspire-skill.update-check"
 LAUNCH_LOG="$HOME/Library/Logs/inspire-skill-update-check.log"
-ALL_HARNESSES="codex,claude,cursor,opencode,zcode,kimi-code,kimi-work,qoder,qoder-work,antigravity,openclaw,pi"
+ALL_HARNESSES="codex,claude,cursor,opencode,zcode,kimi-code,kimi-work,qoder,qoder-work,antigravity,openclaw,pi,deepseek"
 
 HARNESSES=""
 INSTALL_CLI=1
@@ -52,6 +52,15 @@ PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 case "$PI_AGENT_DIR" in
   "~")   PI_AGENT_DIR="$HOME" ;;
   "~/"*) PI_AGENT_DIR="$HOME/${PI_AGENT_DIR#\~/}" ;;
+esac
+DEEPSEEK_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
+case "$DEEPSEEK_HOME_DIR" in
+  *[![:space:]]*) ;;
+  *) DEEPSEEK_HOME_DIR="$HOME/.dsh" ;;
+esac
+case "$DEEPSEEK_HOME_DIR" in
+  "~")               DEEPSEEK_HOME_DIR="$HOME" ;;
+  "~/"* | "~\\"*) DEEPSEEK_HOME_DIR="$HOME/${DEEPSEEK_HOME_DIR:2}" ;;
 esac
 
 color()  { local c="$1"; shift; printf '\033[%sm%s\033[0m' "$c" "$*"; }
@@ -105,6 +114,7 @@ skill_target() {
     antigravity)  echo "$HOME/.gemini/config/skills/inspire" ;;
     openclaw)     echo "$HOME/.openclaw/skills/inspire" ;;
     pi)           echo "$PI_AGENT_DIR/skills/inspire" ;;
+    deepseek)     echo "$DEEPSEEK_HOME_DIR/skills/inspire" ;;
   esac
 }
 
@@ -251,13 +261,14 @@ detect_harnesses() {
   [[ -d "$HOME/.gemini"                                      ]] && found+=("antigravity")
   [[ -d "$HOME/.openclaw"                                    ]] && found+=("openclaw")
   [[ -d "$PI_AGENT_DIR"                                      ]] && found+=("pi")
+  [[ -d "$DEEPSEEK_HOME_DIR"                                 ]] && found+=("deepseek")
   (IFS=,; echo "${found[*]:-}")
 }
 
 if [[ -z "$HARNESSES" ]]; then
   HARNESSES="$(detect_harnesses)"
   [[ -n "$HARNESSES" ]] \
-    || die "no agent harness detected (checked \$HOME/.codex, .claude, .cursor, \$OPENCODE_CONFIG_DIR or \$HOME/.config/opencode, .zcode, \$KIMI_CODE_HOME or \$HOME/.kimi-code, Kimi Work's Application Support directory, .qoder, .qoderwork, .gemini, .openclaw, \$PI_CODING_AGENT_DIR or \$HOME/.pi/agent). Pass --harness explicitly."
+    || die "no agent harness detected (checked \$HOME/.codex, .claude, .cursor, \$OPENCODE_CONFIG_DIR or \$HOME/.config/opencode, .zcode, \$KIMI_CODE_HOME or \$HOME/.kimi-code, Kimi Work's Application Support directory, .qoder, .qoderwork, .gemini, .openclaw, \$PI_CODING_AGENT_DIR or \$HOME/.pi/agent, \$DSH_HOME or \$HOME/.dsh). Pass --harness explicitly."
   log "auto-detected harnesses: $(bold "$HARNESSES")"
 fi
 

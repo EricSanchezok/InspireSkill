@@ -6,6 +6,7 @@ import asyncio
 import json
 from dataclasses import asdict, is_dataclass
 from typing import Any
+from urllib.request import getproxies_environment
 
 import httpx
 import pytest
@@ -283,6 +284,9 @@ def test_httpx_preserves_prepared_request_and_proxy_settings(
     from inspire.platform.web.transport_async import AsyncDriver
     from inspire.platform.web.transport_core import Send
 
+    # This matrix controls environment proxies; macOS system settings must not
+    # supply a real proxy when the environment is deliberately empty.
+    monkeypatch.setattr(requests.utils, "getproxies", getproxies_environment)
     for name in (
         "http_proxy",
         "https_proxy",

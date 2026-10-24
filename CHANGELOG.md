@@ -2,6 +2,11 @@
 
 各版本条目记录该版本发布时的用户可见变化；当前用法以 README 和 CLI Help 为准。
 
+## v7.1.14
+
+- 新增 DeepSeek Harness Skill 安装、自动检测、更新与卸载支持，遵循 `DSH_HOME` 自定义目录。
+- 整理 CLI、Python SDK 与平台操作参考文档。
+
 ## v7.1.13
 
 - 修复配置 SOCKS 代理后，登录、账号检查及同步 HTTP 请求因缺少依赖而失败的问题。

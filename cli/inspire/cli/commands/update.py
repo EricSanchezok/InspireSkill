@@ -100,6 +100,18 @@ def _pi_agent_dir() -> Path:
     return Path.home() / ".pi" / "agent"
 
 
+def _deepseek_home() -> Path:
+    """Resolve DeepSeek Harness's home: $DSH_HOME or ~/.dsh."""
+    override = os.environ.get("DSH_HOME", "")
+    if not override.strip():
+        return Path.home() / ".dsh"
+    if override == "~":
+        return Path.home()
+    if override.startswith(("~/", "~\\")):
+        return (Path.home() / override[2:]).absolute()
+    return Path(override).absolute()
+
+
 HARNESS_SKILL_DIRS = {
     "codex": Path.home() / ".codex" / "skills" / "inspire",
     "claude": Path.home() / ".claude" / "skills" / "inspire",
@@ -113,6 +125,7 @@ HARNESS_SKILL_DIRS = {
     "antigravity": Path.home() / ".gemini" / "config" / "skills" / "inspire",
     "openclaw": Path.home() / ".openclaw" / "skills" / "inspire",
     "pi": _pi_agent_dir() / "skills" / "inspire",
+    "deepseek": _deepseek_home() / "skills" / "inspire",
 }
 HARNESS_ROOTS = {
     "codex": Path.home() / ".codex",
@@ -127,6 +140,7 @@ HARNESS_ROOTS = {
     "antigravity": Path.home() / ".gemini",
     "openclaw": Path.home() / ".openclaw",
     "pi": _pi_agent_dir(),
+    "deepseek": _deepseek_home(),
 }
 
 PYPI_MIRROR_INDEX_URLS = (

@@ -88,6 +88,7 @@ def test_detect_harnesses_includes_all_supported_desktop_and_cli_harnesses(
         "antigravity": tmp_path / ".gemini",
         "openclaw": tmp_path / ".openclaw",
         "pi": tmp_path / ".pi" / "agent",
+        "deepseek": tmp_path / ".dsh",
     }
     for root in roots.values():
         root.mkdir(parents=True)
@@ -106,6 +107,7 @@ def test_detect_harnesses_includes_all_supported_desktop_and_cli_harnesses(
         "antigravity",
         "openclaw",
         "pi",
+        "deepseek",
     ]
 
 
@@ -121,6 +123,28 @@ def test_cursor_skill_dir_uses_cursor_global_skills_path() -> None:
     assert update_module.HARNESS_SKILL_DIRS["cursor"] == (
         Path.home() / ".cursor" / "skills" / "inspire"
     )
+
+
+@pytest.mark.parametrize("override", [None, "", "  ", "~", "~/custom dsh", "~\\custom dsh", "relative dsh"])
+def test_deepseek_home_resolves_official_path_forms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: str | None,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DSH_HOME", raising=False)
+    if override is not None:
+        monkeypatch.setenv("DSH_HOME", override)
+
+    if override is None or not override.strip():
+        expected = home / ".dsh"
+    elif override == "~":
+        expected = home
+    elif override.startswith("~"):
+        expected = home / "custom dsh"
+    else:
+        expected = tmp_path / override
+    assert update_module._deepseek_home() == expected
 
 
 def test_kimi_code_skill_dir_uses_kimi_code_global_skills_path() -> None:
@@ -597,11 +621,16 @@ def _skill_tarball(entries: dict[str, bytes]) -> bytes:
 
 
 @pytest.mark.parametrize("directory", ["default", "absolute", "tilde"])
-def test_pi_skill_refresh_and_uninstall_use_the_agent_directory(
+@pytest.mark.parametrize("harness,default_dir,env_key", [
+    ("pi", ".pi/agent", "PI_CODING_AGENT_DIR"),
+    ("deepseek", ".dsh", "DSH_HOME"),
+])
+def test_skill_refresh_and_uninstall_use_the_harness_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory: str,
+    harness: str, default_dir: str, env_key: str,
 ) -> None:
     home = tmp_path / "home"
-    agent_dir = home / (".pi/agent" if directory == "default" else "custom pi agent")
+    agent_dir = home / (default_dir if directory == "default" else "custom agent home")
     target = agent_dir / "skills" / "inspire"
     target.mkdir(parents=True)
     (target / "stale.md").write_text("old reference\n", encoding="utf-8")
@@ -615,16 +644,16 @@ def test_pi_skill_refresh_and_uninstall_use_the_agent_directory(
             patch.setattr(Path, "home", classmethod(lambda _cls: home))
             patch.setenv("HOME", str(home))
             patch.setenv("USERPROFILE", str(home))
-            for key in ("OPENCODE_CONFIG_DIR", "KIMI_CODE_HOME", "PI_CODING_AGENT_DIR"):
+            for key in ("OPENCODE_CONFIG_DIR", "KIMI_CODE_HOME", "PI_CODING_AGENT_DIR", "DSH_HOME"):
                 patch.delenv(key, raising=False)
             if directory == "absolute":
-                patch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+                patch.setenv(env_key, str(agent_dir))
             elif directory == "tilde":
-                patch.setenv("PI_CODING_AGENT_DIR", "~/custom pi agent")
+                patch.setenv(env_key, "~/custom agent home")
             importlib.reload(update_module)
-            assert update_module.HARNESS_ROOTS["pi"] == agent_dir
-            assert update_module.HARNESS_SKILL_DIRS["pi"] == target
-            assert update_module._detect_harnesses() == ["pi"]
+            assert update_module.HARNESS_ROOTS[harness] == agent_dir
+            assert update_module.HARNESS_SKILL_DIRS[harness] == target
+            assert update_module._detect_harnesses() == [harness]
             patch.setattr(
                 update_module, "_download_tarball",
                 lambda: _skill_tarball({
@@ -633,7 +662,7 @@ def test_pi_skill_refresh_and_uninstall_use_the_agent_directory(
                 }),
             )
             assert update_module._refresh_skill_files(silent=True) is True
-            assert update_module._installed_skill_harnesses() == ["pi"]
+            assert update_module._installed_skill_harnesses() == [harness]
             assert (target / "SKILL.md").read_bytes() == b"new pi skill\n"
             assert (target / "references" / "setup.md").read_bytes() == b"new reference\n"
             assert not (target / "stale.md").exists()
@@ -645,12 +674,12 @@ def test_pi_skill_refresh_and_uninstall_use_the_agent_directory(
             patch.setenv("PLAYWRIGHT_BROWSERS_PATH", "0")
             result = CliRunner().invoke(cli_main, ["uninstall", "--yes"])
             assert result.exit_code == 0, result.output
-            assert "pi skill" in result.output
+            assert f"{harness} skill" in result.output
             assert not target.exists()
             assert agent_dir.is_dir()
             assert shared_skill.read_text(encoding="utf-8") == "shared skill\n"
             if directory != "default":
-                assert not (home / ".pi").exists()
+                assert not (home / default_dir).exists()
     finally:
         importlib.reload(update_module)
 

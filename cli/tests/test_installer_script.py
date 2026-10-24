@@ -90,7 +90,7 @@ def test_installer_first_uv_install_without_inspire_on_path(tmp_path: Path) -> N
             "bash",
             str(installer),
             "--harness",
-            "codex,claude,cursor,opencode,zcode,kimi-code,kimi-work,qoder,qoder-work,antigravity,openclaw,pi",
+            "codex,claude,cursor,opencode,zcode,kimi-code,kimi-work,qoder,qoder-work,antigravity,openclaw,pi,deepseek",
             "--no-schedule",
         ],
         cwd=installer.parent.parent,
@@ -127,17 +127,23 @@ def test_installer_first_uv_install_without_inspire_on_path(tmp_path: Path) -> N
     assert (home / ".gemini" / "config" / "skills" / "inspire" / "SKILL.md").exists()
     assert (home / ".openclaw" / "skills" / "inspire" / "SKILL.md").exists()
     assert (home / ".pi" / "agent" / "skills" / "inspire" / "SKILL.md").exists()
+    assert (home / ".dsh" / "skills" / "inspire" / "SKILL.md").exists()
     assert not (home / ".kimi-code" / "skills" / "inspire" / "SKILL.md").exists()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="drives the bash installer end to end")
 @pytest.mark.parametrize("explicit", [True, False], ids=["explicit", "auto-detect"])
 @pytest.mark.parametrize("directory", ["default", "absolute", "tilde"])
-def test_pi_installer_and_uninstall_use_the_agent_directory(
+@pytest.mark.parametrize("harness,default_dir,env_key", [
+    ("pi", ".pi/agent", "PI_CODING_AGENT_DIR"),
+    ("deepseek", ".dsh", "DSH_HOME"),
+])
+def test_installer_and_uninstall_use_the_harness_directory(
     tmp_path: Path, explicit: bool, directory: str,
+    harness: str, default_dir: str, env_key: str,
 ) -> None:
     home = tmp_path / "home"
-    agent_dir = home / (".pi/agent" if directory == "default" else "custom pi agent")
+    agent_dir = home / (default_dir if directory == "default" else "custom agent home")
     if not explicit:
         agent_dir.mkdir(parents=True)
     shared_skill = home / ".agents" / "skills" / "inspire" / "SKILL.md"
@@ -165,10 +171,10 @@ def test_pi_installer_and_uninstall_use_the_agent_directory(
         "INSPIRE_SKIP_UPDATE_CHECK": "1",
     }
     if directory == "absolute":
-        env["PI_CODING_AGENT_DIR"] = str(agent_dir)
+        env[env_key] = str(agent_dir)
     elif directory == "tilde":
-        env["PI_CODING_AGENT_DIR"] = "~/custom pi agent"
-    harness_args = ["--harness", "pi"] if explicit else []
+        env[env_key] = "~/custom agent home"
+    harness_args = ["--harness", harness] if explicit else []
     installer = SCRIPTS / "install.sh"
     result = subprocess.run(
         ["bash", str(installer), "--no-cli", "--no-schedule", *harness_args],
@@ -179,7 +185,7 @@ def test_pi_installer_and_uninstall_use_the_agent_directory(
     assert (target / "SKILL.md").read_bytes() == b"pi skill\n"
     assert (target / "references" / "setup.md").read_bytes() == b"pi reference\n"
     if directory != "default":
-        assert not (home / ".pi").exists()
+        assert not (home / default_dir).exists()
 
     result = subprocess.run(
         ["bash", str(installer), "--uninstall", "--yes"],
@@ -202,6 +208,7 @@ def test_installer_advertises_supported_harnesses() -> None:
     assert "kimi-work" in text
     assert "zcode" in text
     assert "pi" in text
+    assert "deepseek" in text
 
 
 def test_powershell_installer_uses_the_published_package_not_an_editable_checkout() -> None:
