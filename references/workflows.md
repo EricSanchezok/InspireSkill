@@ -1,61 +1,50 @@
-# 项目工作流
+# Multi-Stage Project Workflows
 
-一个项目跨越 CPU 准备、数据处理、GPU 训练、部署或交付时看本页。这里给阶段化决策和验收点，不维护命令模板；具体命令表面回到 CLI Help，单领域边界分别看 Assets、Resources、Internal Sources、Paths、Dataset、Notebook、Image、Compute Workloads 和 Model References。
+Use this guide when planning an end-to-end project across environment preparation, CPU data processing, GPU training, and model deployment. Refer to the domain-specific references for detailed rules on [`assets.md`](assets.md), [`resources.md`](resources.md), [`internal-sources.md`](internal-sources.md), [`paths.md`](paths.md), [`dataset.md`](dataset.md), [`notebook.md`](notebook.md), [`image.md`](image.md), [`compute-workloads.md`](compute-workloads.md), and [`model.md`](model.md).
 
-## 1. 总体框架
+## 1. Three-Stage Pipeline
 
-每个阶段都根据当前任务和 Live 事实重新确认 Project / Workspace / Paths / Image，不从仓库绑定或 Profile 继承。如果存在 `INSPIRE.md`，只读取与当前 Project 相关的稳定资产条目（见 [`assets.md`](assets.md)）。之后把项目推进拆成三段：
+Select `project`, `workspace`, remote paths, and `image` explicitly at each stage based on live platform state (and `INSPIRE.md` if present):
 
-| 阶段 | 目标 | 典型平台位置 | 验收 |
+| Stage | Goal | Typical Environment | Acceptance Criteria |
 | --- | --- | --- | --- |
-| A. 联网准备 | 下载代码、依赖、数据、权重，形成共享盘布局或镜像 | `CPU资源空间` 的可上网 CPU Notebook | Repo 可更新，依赖可导入，数据 / 权重路径可读，镜像 `READY` |
-| B. CPU 处理 | 预处理、清洗、评测、打包、索引构建 | HPC，必要时 Ray | 小规模 Probe 通过，正式规模产物完整，有 Fingerprint |
-| C. GPU 训练 / 部署 | 单节点调试、多节点训练、Serving | `分布式训练空间` 的 GPU Notebook、Job、Serving | 日志推进，Metrics 有负载，产物 / 服务 Smoke 通过 |
+| **A. Staging & Prep** | Clone code, download external data/weights, install dependencies, and bake an image | Internet-enabled CPU Notebook in `CPU资源空间` | Repo checked out at target commit, imports verified, shared paths readable, custom image `READY` |
+| **B. CPU Processing** | Data preprocessing, cleaning, evaluation, packaging, index building | `inspire hpc` (or `ray` for streaming/elastic pipelines) | Small-scale probe passes; full output verified on shared storage with a fingerprint/manifest |
+| **C. GPU Training & Serving** | Single-node debugging, multi-node training, or online HTTP serving | GPU Notebook, `job`, or `serving` in `分布式训练空间` | Logs advance, metrics show active GPU/network load, checkpoints or serving smoke tests pass |
 
-核心原则：公网和依赖准备前置；目标 GPU 空间只负责读共享盘、拉已准备镜像、运行目标程序。用户指认的专属 Workspace 只有在硬件、权限或项目环境明确要求时才进入计划。
+**Core principle:** Front-load all internet downloads and environment builds in Stage A so GPU workloads in Stage C only read shared storage, pull a pre-built `READY` image, and run.
 
-## 2. 阶段 A：准备
+## 2. Stage A: Staging & Environment Preparation
 
-准备阶段要产出两类稳定结果：
+Deliverables from Stage A:
+- **Shared storage layout:** Absolute `/inspire/...` paths for code, datasets, weights, checkpoints, and outputs.
+- **Reusable base image:** Python/system dependencies and required runtimes (CUDA, Slurm, Ray, or serving server) validated in a Notebook, cleaned of temporary files/caches, and committed via `notebook save-image`.
+- **`INSPIRE.md` update:** Record canonical remote paths and the new base image if they will be reused across sessions.
 
-- 共享盘布局：代码、数据、权重、Checkpoint、输出目录、Fingerprint 约定。
-- 可复用镜像：项目依赖、系统依赖、Slurm / Ray Runtime、服务 Runtime。
+## 3. Stage B: CPU Data Processing
 
-验收不要只看命令返回成功。至少确认：
+- Prefer **HPC** (`inspire hpc`) for fixed-scale CPU batch jobs; use **Ray** (`inspire ray`) only when elastic worker groups or streaming actors are required.
+- Run a small probe matching your production task layout before launching a full batch.
+- For HPC jobs, verify `Steps` in `hpc status` (to confirm `srun` actually executed) and inspect output file counts, sizes, and checksums from a Notebook in the same project.
 
-- 远端 Repo 能更新到目标 Commit。
-- 关键 Python / System 依赖能在目标镜像里导入或执行。
-- 数据和权重路径在目标项目共享盘下可读。
-- 后续 Workload 要复用的镜像状态为 `READY`。
-- 需要长期复用的绝对路径、适用 Project / Workspace 和基底镜像身份已按 [`assets.md`](assets.md) 写入 `INSPIRE.md`。
+## 4. Stage C: GPU Training
 
-## 3. 阶段 B：CPU 处理
+Before submitting a multi-node GPU Job, confirm that:
+1. Code, datasets, and weights are in place on project shared storage (or mounted via `--dataset`).
+2. All dependencies are baked into a `READY` image so no outbound internet access is needed at startup.
+3. Target GPU quotas and compute groups have sufficient live capacity (`inspire resources availability`).
+4. A single-node probe has verified CUDA, NCCL, data loading, and checkpoint writing.
 
-固定规模 CPU 批处理优先 HPC；流式、长守护或异构 Worker 才考虑 Ray。选型边界见 [`compute-workloads.md`](compute-workloads.md)。
+During training, monitor four signals:
+- **`job events`** — scheduling, image pulls, and container startup.
+- **`job logs`** — application output and stack traces.
+- **`job metrics` / `job instances`** — per-Pod GPU utilization, memory, and network balance (a single lagging worker often appears in metrics before logs fail).
+- **`inspire tensorboard scalars`** — training loss and evaluation curves read directly from the summary directory without opening a browser.
 
-正式放量前先跑接近生产形状的 Probe。小规模通过不代表正式规模稳定；正式处理要写 Fingerprint，并用同项目 Notebook 回读产物目录确认数量、大小和内容摘要。
+## 5. Deployment & Delivery
 
-## 4. 阶段 C：GPU 训练
-
-进入训练前应已经具备：
-
-- 代码在共享盘 Repo 中，或镜像内已包含固定代码。
-- 数据和权重在目标项目共享路径可见。
-- 依赖在镜像中，或目标环境无需公网安装。
-- 目标 GPU Quota 和 Compute Group 实时可用。
-- 单节点 Probe 已验证 CUDA、NCCL、数据路径和入口脚本。
-
-正式多节点训练看四条线：Events 判断调度，Logs 判断程序，Metrics 判断资源是否真的工作，TensorBoard 判断模型本身训得怎么样。前三条都在回答「平台侧这个任务还好吗」，回答不了「loss 还在不在降」——那要对着训练写出的 summary 目录建一个 board，用 `inspire tensorboard scalars` 把曲线当数字读回来，不需要开浏览器。多节点中某个 Pod 长期低 GPU / 低网络时，不要只盯 `RUNNING`，回到该 Worker 日志和数据加载路径。
-
-## 5. 部署或交付
-
-模型服务先把模型目录注册到 Model Registry，再创建 Serving。Serving 验收不止看状态：
-
-- 服务实例齐全，没有长期 Pending。
-- Metrics 显示请求或模型加载后的资源曲线合理。
-- `api-metrics` 显示请求真的到达且在成功——资源曲线区分不了「没人调用」和「一直调用一直失败」。
-- `/health`、`/v1/models` 或业务 Smoke Test 通过。
-- 无 Key 请求被拒绝，带 Key 请求成功。
-- 模型版本、镜像版本、启动命令和端口写入 `INSPIRE.md` 的复现合同。
-
-非服务型交付则回到共享盘产物：目录结构、Fingerprint、大小、样例文件和下游读取 Smoke 都要确认。
+For online serving:
+1. Register the model directory in the Model Registry (`inspire model register`) and check minimum hardware specs (`inspire model deploy-config`).
+2. Create the service (`inspire serving create`) and monitor `serving events` and `serving instances`.
+3. Verify both resource load (`serving metrics`) and request traffic (`serving api-metrics`), run an authenticated smoke test with `INF_API_KEY`, and confirm unauthenticated requests are rejected.
+4. Record the production model version, image, launch command, and port in `INSPIRE.md`.

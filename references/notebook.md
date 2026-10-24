@@ -1,175 +1,143 @@
-# Notebook 工作流
+# Notebook Workflows
 
-创建交互环境、进入容器、管理远端文件、暴露容器 HTTP 服务，或用 Notebook 准备可复用环境并固化成镜像时看本页。资源条件看 [`resources.md`](resources.md)；联网准备和内部源看 [`internal-sources.md`](internal-sources.md)；保存出来的镜像之后怎么选、怎么共享、怎么清理看 [`image.md`](image.md)。命令语法和参数以 CLI Help 为准。
+Use this guide when creating interactive Notebooks, running remote commands (`exec` / `shell`), transferring files (`scp`), exposing HTTP services (`proxy-url`), or saving a running Notebook as a reusable image (`save-image`). For scheduling and quotas, see [`resources.md`](resources.md); for internal mirrors, see [`internal-sources.md`](internal-sources.md); for managing saved images, see [`image.md`](image.md).
 
-## 1. Notebook 的角色
+## 1. Notebook Roles
 
-Notebook 是交互工作台，不只是“开一个终端”。
-
-| 角色 | 适用场景 |
+| Role | Typical Setup |
 | --- | --- |
-| 联网准备盒 | 在 `CPU资源空间` 准备公网内容，写共享盘或保存镜像 |
-| 内部源验证盒 | 在目标 Workspace 验证 `pip` / Apt / Conda / `npm` / Docker 内部源是否可达 |
-| GPU Probe | 在 `分布式训练空间` 小规模验证 CUDA、NCCL、数据路径和训练入口 |
-| 远端文件入口 | 通过 `shell` / `exec` / `scp` 管理共享盘文件 |
-| 临时服务盒 | 跑 Gradio、FastAPI、OpenAI-Compatible API，再通过 Notebook Proxy 访问 |
+| Internet Staging Box | CPU Notebook in `CPU资源空间` to clone repos, download external weights/datasets to shared storage, or prepare images |
+| Internal Mirror Testbed | Notebook in the target Workspace to configure and verify `pip`, Apt, Conda, `npm`, or Docker internal mirrors |
+| GPU Probe | Small GPU Notebook in `分布式训练空间` to validate CUDA, NCCL, data mounts, and training entrypoints before submitting full Jobs |
+| File Transfer Gateway | SSH-capable Notebook used with `shell`, `exec`, `scp`, or `rsync` to manage files on `/inspire/...` |
+| Interactive Service Host | Running Gradio, FastAPI, or OpenAI-compatible servers exposed via `notebook proxy-url` |
 
-`分布式训练空间` 不可上网时，不要把外部下载塞进 GPU Notebook 或 Job 的启动路径。公网内容先放到 CPU 准备盒；只依赖 SII 内部源时可以直接在目标 Notebook 验证。
+When `分布式训练空间` has no public internet access, perform all external downloads from a CPU Notebook in `CPU资源空间` first.
 
-## 2. 创建前判断
+## 2. Creating a Notebook
 
-创建 Notebook 前只判断平台语义，不在 Reference 里维护完整命令模板：
+Before running `inspire notebook create`:
+1. Pick the Workspace matching the role (`CPU资源空间` for CPU staging, `分布式训练空间` for GPU probes).
+2. Query `inspire notebook quota --workspace <workspace>` and copy both `--group` and `--quota` (`gpu,cpu,mem`) from the same live row.
+3. Pass `workspace`, `project`, `group`, `quota`, and a `READY` `image` explicitly.
+4. If mounting official datasets with `--dataset <name>:<version>`, verify access first (see [`dataset.md`](dataset.md)).
+5. **Keep Notebook names unique within each Workspace.** The platform allows duplicate names, which forces `--pick` on every subsequent name-based command; `notebook create` checks existing names in the target Workspace (case-insensitive) and rejects duplicates before submitting.
 
-1. 用真实 Workspace 选择角色：CPU 准备盒走 `CPU资源空间`，GPU Probe 走 `分布式训练空间`。
-2. 用 Quota Live 查询选择合法 `gpu,cpu,mem` 三元组。
-3. 确认 Project 是目标项目名，Image 已 `READY`。
-4. 每次创建都从当前 Live Quota Row 显式传入 Workspace / Project / Group / Quota / Image。
-5. 需要数据广场的官方数据集时用 `--dataset <数据集名>:<版本名>`，先按 [`dataset.md`](dataset.md) 确认版本和访问权限。
+Optional creation controls:
+- **Read-only shared mounts:** Shared storage is mounted read-write by default. Use the read-only mount flags on `notebook create` to downgrade the project public directory or project members directory to read-only (`ro`). Making the project members directory read-only requires Project Maintainer permissions.
+- **Auto-stop vs. platform policies:** `--auto-stop` requests idle auto-stop, whereas scheduled stop sets a fixed runtime countdown (visible under `Auto-stop In` in `notebook status`). Neither overrides Workspace idle-reclaim rules or daily shutdown limits — check `inspire resources policy --workspace <name>` before leaving a Notebook running. Use Job, HPC, Ray, or Serving for long-running workloads.
+- **Node pinning:** Pass a node name from the selected Compute Group only when debugging a specific machine or reproducing hardware issues. `notebook status` shows the assigned `Node` along with its health, cordon, and maintenance state while `RUNNING`.
 
-共享盘默认可写。需要防止误写项目公共目录或项目成员目录时，创建时用只读挂载开关把它们降级为 `ro`；项目成员目录那一档还要求当前账号是项目 Maintainer，否则平台直接拒绝创建。两者默认都不开启，行为与不传时一致。
+## 3. Transport & Remote Execution (`exec` / `shell` / `ssh`)
 
-**名字在一个 Workspace 里必须唯一，这条得自己守。** 平台不校验重名——同一个名字连建两个都会成功——而 CLI 全程按名字寻址，重名之后每一条 `notebook <动词> <名字>` 都变成歧义、必须 `--pick` 才能落到具体那一个。`notebook create` 因此在提交前先查一遍同 Workspace 的现有名字（大小写不敏感，忽略尾部空格）并挡下重名；探测失败时让路、不拦创建。
+Transport is determined automatically by the machine's actual GPU model:
+- **Restricted Notebooks (`H100` / `H200`):** Do not support SSH or `rtunnel`. Commands run over `JupyterTerminal`.
+- **Standard Notebooks (all other GPUs and CPU nodes):** Use SSH over `rtunnel`.
 
-`--auto-stop` 只表达空闲自动停止请求，不覆盖平台管理员设置的自动回收规则或 Workspace 生命周期上限——这些阈值和时限用 `inspire resources policy --workspace <名字>` 读当前 Live 值。定时停止是另一回事：它是平台侧的运行时长计时器，到点停机，与空闲无关。长时间训练、批量推理或守护任务应改用 Job、Ray 或 Serving 这类匹配的 Workload。需要在 Notebook 中验证长任务入口时，只跑短 Probe，并把正式命令迁移到后台 Workload。
+The CLI probes `nvidia-smi` over `JupyterTerminal` once per `(account, base_url, compute_group)` and caches the detected GPU model in `~/.inspire/notebook-gpu-models.json` (clearable per account with `inspire cache clear --resource notebook-gpu`). The Notebook must be `RUNNING` before calling `ssh`, `exec`, `shell`, or `scp`.
 
-手动 Pin 节点只用于排查坏节点、复现实验或平台同学明确指定节点；传入所选 Compute Group 中显示的节点名。实际落在哪个节点由 `notebook status` 的 `Node` 给出，后面跟着该节点的健康状态，被 Cordon 或处于维护窗口时一并标出——正在跑不代表下次重启还能落回来。停止的 Notebook 不占节点，这一行随之消失。
-
-## 3. 连接方式
-
-Transport 由机器实际的显卡型号决定：显卡是 `H100` 或 `H200` 的是**受限 Notebook**，不使用 SSH / Rtunnel；其余机器走 SSH。CLI 自动完成该判断——用 JupyterTerminal 在机器上跑一次 `nvidia-smi` 读型号。结果按 **Account Alias、平台地址和 Compute Group** 区分，保存在 `~/.inspire/notebook-gpu-models.json`：同一账号、同一平台上，一个组的首个 Notebook 探完，之后落在该组的 Notebook 就可复用。并发写入会保留其他账号的记录；缺少账号归属的记录不用于所选账号的 Transport 判断。`inspire cache clear --resource notebook-gpu` 只清理所选账号的这一层缓存。
-
-机器答不上来（Notebook 未启动、Jupyter 起不来）时命令直接报错退出，不猜 Transport：`ssh` / `exec` / `shell` / `scp` 本来就都要求 Notebook 处于 `RUNNING`。未启动时提示先 `inspire notebook start <name> --workspace <workspace>`。
-
-受限 Notebook 在选定或使用 JupyterTerminal 前，会把名称缓存中的 Notebook 句柄与 Live 列表对账；同名实例被删除后重建、旧句柄仍留在本地时，CLI 自动替换为当前实例，不要求用户先跑 `cache refresh`。`--ignore-target-cache` 会从一开始跳过 Remembered Connection Target 和 Notebook 名称缓存，直接用 Live 身份完成 Transport 预检；它是显式诊断开关，不是日常恢复步骤。JupyterTerminal 仍失败时，用根级 `--debug` 重跑同一条命令，诊断会区分 access URL、Jupyter GET、XSRF、Terminal POST、代理、WebSocket 和 completion marker；网页 Terminal 正常时优先检查 `HTTP(S)_PROXY` / `NO_PROXY`，不要把手动刷新缓存后的偶然恢复当成根因。
-
-| 入口 | 心智模型 | 受限 Notebook 行为 |
+| Command | Purpose | Restricted Notebook (`H100`/`H200`) Behavior |
 | --- | --- | --- |
-| `exec` | 一次性独立命令，不接收本地 stdin | 自动走 JupyterTerminal；拒绝 `--stdin`、本地管道和 `< file` 输入 |
-| `shell` | 持久交互会话 | 自动走 JupyterTerminal |
-| `scp` | SSH / SCP 文件复制 | 受限 Notebook 不使用；改走支持 SSH 的 Notebook 与 `/inspire/...` 共享路径 |
-| `ssh` | OpenSSH 交互 | 受限 Notebook 不使用 |
-| `ssh-config` | 给 OpenSSH、`scp`、`rsync`、VS Code Remote SSH 使用 | 受限 Notebook 不生成 |
-| `connection refresh` | 创建/刷新 SSH / Rtunnel Cache | 受限 Notebook 不建立连接 |
-| `ssh-proxy` | OpenSSH ProxyCommand | 受限 Notebook 不使用 |
-| `proxy-url` | 返回容器 HTTP 端口的外部地址 | 受限 Notebook 默认拒绝 |
+| `exec` | Run a one-off non-interactive command | Uses `JupyterTerminal` (ephemeral terminal per call); rejects `--stdin`, `--bash-stdin`, local pipes, and `< file` redirection |
+| `shell` | Interactive TTY shell (`exit` to quit, `Ctrl+]` to force-disconnect) | Uses `JupyterTerminal` |
+| `scp` | Upload/download files over SCP | Not supported; transfer via an SSH-capable Notebook through `/inspire/...` shared storage |
+| `ssh` / `ssh-config` / `ssh-proxy` | OpenSSH session, `~/.ssh/config` stanza, and `ProxyCommand` | Not supported |
+| `connection refresh` | Bootstrap or refresh the SSH / `rtunnel` bridge | Not needed (no SSH bridge) |
+| `proxy-url` | Print external HTTP proxy URL for a container port | Rejected by default (requires `--allow-restricted`) |
 
-`--workspace` 主要用于首次解析或同名 Notebook 消歧；连接缓存建立后，后续命令通常可按名称使用。缓存是性能和连接复用工具，不是平台事实来源。
+### `JupyterTerminal` Execution Rules (Restricted Notebooks)
 
-受限 Notebook 的 `exec` 每次使用独立临时 Jupyter Terminal，命令结束后立即回收，不共享 `cwd`、环境变量或 Shell 状态。
+- **No local stdin forwarding:** `JupyterTerminal` feeds its internal control wrapper over stdin and binds the user command's stdin to `/dev/null` so commands like `cat` or `bash -s` cannot swallow the completion marker. Passing `--stdin`, `--bash-stdin`, or piping/redirecting local stdin into `inspire notebook exec` is rejected before any command is sent.
+- **Remote redirection works normally:** Redirecting files that already exist on `/inspire/...` inside the remote command string works as expected:
+  ```bash
+  inspire notebook exec <name> "python task.py < /inspire/.../input.jsonl"
+  ```
+- **Stale handle recovery:** Before opening a `JupyterTerminal`, the CLI reconciles cached Notebook handles against the live Workspace listing so deleting and recreating a Notebook with the same name automatically picks up the new instance. Pass `--ignore-target-cache` to bypass remembered target caches during diagnostics, or run with root `--debug` to inspect URL, XSRF, proxy (`HTTP(S)_PROXY` / `NO_PROXY`), and WebSocket stages.
 
-JupyterTerminal `exec` 的内部控制脚本由 stdin 送入远端 Shell，因此用户命令的默认 stdin 被隔离为 `/dev/null`，避免 `cat` / `bash -s` 一类读取者吞掉控制脚本的完成标记。它无法承载本地用户输入：显式 `--stdin` / `--bash-stdin`，以及本地 `producer | inspire notebook exec ...`、`inspire notebook exec ... < local-file` 都会在发送用户命令前失败。远端命令自身在引号内使用管道或显式读取远端文件会覆盖 `/dev/null`，例如 `inspire notebook exec <name> "python task.py < /inspire/.../input.jsonl"`。需要传入本地脚本或数据时，先经支持 SSH 的 Notebook 放到 `/inspire/...`，再按远端路径执行或读取；需要人工交互时使用带 TTY 的 `notebook shell`，不要向 `shell` 管道脚本。支持 SSH 的 Notebook 仍可使用 `exec --stdin`。
+### Working Directory & Long-Running Commands
 
-`notebook exec` / `shell` 省略 `--cwd` 时不注入 `cd`，而是保留当前 Transport 给出的初始目录。受限 Notebook 的 JupyterTerminal 使用平台设置的项目用户目录；SSH 登录 Shell 的初始目录由远端 SSH/镜像决定。需要固定目录时显式传入 `/inspire/...` 绝对路径，需要缩写时由本地 shell 环境变量展开。
+- When `--cwd` is omitted, `notebook exec` and `notebook shell` preserve the transport's default working directory (the project user directory on `JupyterTerminal`, or the SSH login shell's default directory on SSH). Pass an explicit `/inspire/...` path to `--cwd` when your command depends on a fixed directory.
+- For commands that run longer than 20 minutes, launch them as background processes on the remote container that write a completion sentinel file, and poll from your local machine rather than holding a synchronous `exec` open.
 
-交互会话用完敲 `exit` 正常退出（`job shell` 同理）。`Ctrl+]` 是强制断开的转义键，用于远端已经不响应、`exit` 也回不来的情况。
+### Account Isolation & SSH Connection Cache
 
-### 按账号选择 Notebook 连接
+- Every `notebook` command accepts `--account <alias>` to operate on another account without changing the global default account. Connection caches and remembered targets (`notebook connection list|status|refresh|forget|prune` and `notebook connection target list|forget`) are strictly isolated per account.
+- **Newly created SSH-capable Notebooks** do not have a cached SSH bridge yet: run `inspire notebook connection refresh <name> --workspace <workspace>` once before calling `exec`, `shell`, or `scp` (or run `ssh` / `ssh-config`, which bootstrap the bridge automatically). Restricted `H100`/`H200` Notebooks skip this step and use `JupyterTerminal` directly.
+- `ssh-config` includes the account alias in the default SSH `Host` name (overridable with `--host`) and pins `--account` inside the generated `ProxyCommand` so VS Code Remote SSH and native `ssh` / `rsync` always use the right account.
 
-Notebook 的创建、查询、启停、删除、`ssh`、`exec`、`shell`、`scp`、`ssh-config`、`ssh-proxy`、`install-deps` 和 Connection Cache 管理均使用统一的 `--account <name>`。它接受一个本地 Account Alias，只影响本次命令，不修改默认账号。省略时使用 `account use` 设置的默认账号。
+## 4. File Transfer & Shared Storage Relay
 
-CLI 只解析所选账号的 Notebook 和 Connection Cache。同名 Notebook 在不同账号下互不影响；同一账号内多匹配时，使用 `--workspace` / `--pick` 或交互选择。
+Prefer Git (`git push` locally, `git pull` remotely) for source code. Use `notebook scp` for small untracked files, configs, and artifacts.
 
-Remembered Target 按 Account Alias、Notebook Name 和 Workspace 区分。需要忽略已记住的目标并让 Transport 预检从 Live Notebook 身份开始时传 `--ignore-target-cache`；这仍然只查询所选账号。
+### Relaying Files to Restricted (`H100`/`H200`) Notebooks
 
-使用其他账号的 Notebook 时传 `--account <name>` 即可，不需要先 `account use`。切换默认账号保留各账号的 Session 和 SSH Connection；连接不可用时，CLI 使用目标账号的 Web Session 和配置重建。受限 Notebook 不建立 SSH Connection，命令执行走 JupyterTerminal。
-
-连接账号在 Transport 预检前确定，预检和执行使用同一目标。受限 Notebook 的 JupyterTerminal 执行同样复用目标 Account Alias 对应的 Web Session 和代理；显式 `--account <name>` 时不会退回当前 Active Account 的登录态。`exec` / `shell` 的 `remote_env` 和重连设置也读取目标账号配置。
-
-刚创建的支持 SSH 的 Notebook 还没有 Cached Connection，`exec` / `shell` / `scp` 会直接报错退出，不会自己 Bootstrap；先跑一次 `inspire notebook connection refresh <name> --workspace <workspace>`。受限 Notebook 不需要这一步，`exec` / `shell` 直接走 JupyterTerminal。`ssh` / `ssh-config` / `ssh-proxy` 自己会建连接，首次仍需要能解析 Notebook 的上下文：通常传 `--workspace <workspace>`，必要时再传 `--account <alias>` 指定所属账号。`ssh-config` 的默认 Host 别名包含 Account Alias，以区分不同账号的同名 Notebook；可用 `--host` 指定自己的 Host 别名。生成的 `ProxyCommand` 固定目标 Account Alias，后续 VS Code Remote SSH / 原生 OpenSSH 连接也使用该账号。
-
-连接缓存由 `notebook connection list/status/refresh/forget/prune` 管理；Remembered Target 由 `notebook connection target list/forget` 管理。两者都只作用于所选账号。具体参数以对应 Help 为准。
-
-`exec` 超过 20 分钟时，把任务写成远端后台进程和 Sentinel 文件，再从本机轮询，不要让本机同步等待。
-
-## 4. 路径和文件流转
-
-源码同步优先走 Git：本地 push，远端 pull。`notebook scp` 适合少量非 Git 文件、产物下载和临时配置，不适合作为源码同步主路径。
-
-多仓库项目把 Repo 并列放在明确的 `/inspire/<tier>/project/<topic>/<path-user>/...` 绝对路径下；项目公共数据、权重和 Checkpoint 放在同一 Project 的 `public` 目录。需要缩写时由本地 shell 环境变量展开，CLI 不保存路径 Alias。
-
-跨 Workspace 时先确认共享盘作用域：同项目路径通常可见，不同项目路径通常因 Fileset 隔离不可见。
-
-### 受限 Notebook 文件流转
-
-受限 Notebook 不使用 SSH / SCP / `rsync`。文件流转以共享盘为边界：
-
-1. 在同账号、同项目上下文里选择一个支持 SSH 的 Notebook（显卡不是 `H100` / `H200`，例如 CPU 机器）。
-2. 用 `inspire notebook scp <ssh-notebook> ... /inspire/<storage>/...` 上传或下载共享路径文件。需要 `rsync` 语义时，先为该 Notebook 生成 SSH Config，再用外部 `rsync` 操作同一个 `/inspire/...` 路径。
-3. 用 `inspire notebook exec <restricted-notebook> "..."` 或 `inspire notebook shell <restricted-notebook>` 在受限 Notebook 内操作同一个 `/inspire/<storage>/...` 路径。
-
-示例：
+Because restricted Notebooks do not support SSH/SCP, relay files through shared storage (`/inspire/...`) using any SSH-capable Notebook (such as a CPU Notebook) in the same account and project:
 
 ```bash
-# 通过支持 SSH 的 Notebook 从本机上传到共享盘。
+# 1. Upload from local machine to shared storage via an SSH-capable CPU Notebook
 inspire notebook scp cpu-box ./dataset.tar /inspire/hdd/project/topic/user/dataset.tar
 
-# 在受限 Notebook 内直接使用同一共享路径，不走 SSH。
+# 2. Access the same shared path directly inside the restricted GPU Notebook
 inspire notebook exec gpu-box "ls -lh /inspire/hdd/project/topic/user/dataset.tar"
 
-# 通过支持 SSH 的 Notebook 下载共享路径产物。
+# 3. Download results from shared storage via the SSH-capable CPU Notebook
 inspire notebook scp cpu-box -d /inspire/hdd/project/topic/user/results.tar ./results.tar
 
-# 为该 Notebook 配好 SSH 后，也可以用外部 rsync 操作共享路径。
+# Or use external rsync after generating ssh-config for cpu-box:
 rsync -av ./dataset/ cpu-box:/inspire/hdd/project/topic/user/dataset/
 ```
 
-受限 Notebook 上 `/inspire/...` 之外的容器本地路径不能由本地 CLI 直接传输；需要带出时先把产物放到 `/inspire/...`。
+Container-local files outside `/inspire/...` on a restricted Notebook must be copied onto `/inspire/...` before they can be downloaded via an SSH Notebook (or use the Python SDK's `notebooks.upload` / `download` with `transport="jupyter"` for small files; see [`sdk.md`](sdk.md)).
 
-## 5. IDE URL 与 HTTP Proxy
+## 5. HTTP Proxy (`notebook proxy-url`)
 
-容器内 HTTP 服务用 `proxy-url` 取得外部地址：
+To access an HTTP server (Gradio, FastAPI, TensorBoard, OpenAI-compatible API) running inside a Notebook container:
 
 ```bash
 inspire notebook proxy-url <name> --workspace <workspace> --port 7860
 ```
 
-它**只打印地址、不打开任何东西**，所以拿到就能直接 `curl`。`--path` 追加服务路径，`--check` 顺带探一次：`reachable` 表示服务在应答，`no_service` 表示端口上没东西（去把服务起起来），`blocked` 表示网关拒绝（权限问题）。
+- Prints the external URL without opening a browser. Use `--path` to append a sub-path and `--check` to probe reachability (`reachable`, `no_service` if nothing is listening on the port, or `blocked` if rejected by the gateway).
+- **Treat the proxy URL as a credential.** It embeds a short-lived gateway token that grants full access to the Notebook. Never commit it or share it publicly.
+- **Configure application-level authentication** (API key or login) on your web server before sharing access with collaborators, as the proxy only provides network routing.
 
-两点必须记住：
+## 6. Base Environments and Saving Images
 
-- **这个地址本身是凭据。** 它内嵌一段短期 token，拿到的人对该 Notebook 的访问权和你一样。它会进对话记录和 shell 历史，别往外发。
-- **Proxy 只提供网络通路，不替代应用自己的鉴权。** Gradio、FastAPI、LLM API 仍要有自己的登录或 API Key。发布给协作者前做无 Key / 有 Key 对照，确认未授权请求会被拒绝。
+To turn a running Notebook into a reusable image for Jobs, HPC, Ray, Serving, or future Notebooks, use `inspire notebook save-image <notebook-name> --workspace <notebook-workspace>`.
 
-## 6. 基底环境与保存镜像
+### Pre-Save Cleanup Checklist
 
-项目早期用统一基底镜像起 Notebook，把 Slurm、Ray、分布式训练依赖和项目依赖一次性装好。公网下载放 CPU 准备盒；只缺内部源时可在目标 GPU Notebook 配置验证。
+**Always clean the container before saving an image:**
+1. Remove temporary directories, package manager caches (`pip cache purge`, `conda clean --all`, `apt-get clean`), downloaded archives, build intermediates, logs, and debug artifacts.
+2. Ensure no credentials, tokens, private keys, or datasets/checkpoints meant for shared storage are left inside the container filesystem.
+3. Re-verify that key imports and entrypoints still work after cleanup.
 
-**每次保存镜像前，必须先检查待固化内容中是否有多余垃圾文件，全部清理完并确认无残留后才能保存。** 检查容器内的临时目录、包管理器缓存、下载包与解压目录、构建中间产物、日志、调试文件、重复文件和废弃环境；用途不明时先核对引用和消费者，删除所有确认无用的内容，只保留运行环境和后续 Workload 必需的文件。数据集、权重、Checkpoint 和批量产物应放在共享盘，不打进镜像；共享盘上仍有消费者的资产不属于镜像垃圾清理范围。清理后重新检查文件残留，并验证关键依赖和目标程序仍能运行。
+### Snapshot Lifecycle & `--flatten`
 
-完成清理并验证通过后保存项目镜像。保存是 **Notebook 的生命周期事件**：`notebook save-image <notebook-name>` 就地提交当前容器，过程中该 Notebook 进入 COMMITTING、不可操作；保存完成后 Notebook 不会自动停止，仍可继续连接和使用，镜像只是这次事件的产物。因此这条命令按 Notebook 名寻址，`--workspace` 指的是 **Notebook 所在的空间**，不是镜像的归属。
+- `notebook save-image` is a **Notebook lifecycle operation** addressed by the Notebook's name and Workspace:
+  - Before committing, the CLI queries and prints the platform's estimated uncompressed writable-layer size (`--dry-run` prints the estimate and exits without saving). The Notebook must be `RUNNING`.
+  - During the snapshot, the Notebook enters `COMMITTING` state and cannot be operated on.
+  - Once the snapshot finishes, the Notebook remains running and usable; wait for the resulting image to reach `READY` before scheduling workloads with it.
+- **Layered vs. flattened snapshots (`--flatten`):**
+  - By default, each `save-image` appends a new incremental layer on top of the base image.
+  - Passing `--flatten` squashes the image into a single layer and permanently removes files that were overwritten or deleted from older layers. Use `--flatten` whenever you deleted large files from an earlier layer, when finalizing a project base image, or after multiple iterative snapshots. (`--flatten` increases background image build time in `CREATING` state but does not lengthen the Notebook's `COMMITTING` lock window.)
+- **Canceling a snapshot (`notebook cancel-save-image <notebook-name>`):** Releases the Notebook back to its pre-save state even after the initial commit phase, leaving behind a `FAILED` image record that can be removed with `image delete` (see [`image.md`](image.md)).
 
-保存前平台会给出快照体积估算并先打印出来，用它判断这次可能占用多久；`--dry-run` 只看估算、不真的保存。这个估算是容器可写层的**未压缩**增量，不是最终镜像体积，两者不能直接换算。Notebook 未运行时命令直接拒绝，不会产生半成品。
+*(Note: Slurm commands like `sinfo` or `srun` will fail inside a regular Notebook because there is no Slurm controller; Slurm is active only inside running `hpc` workloads.)*
 
-**每次默认保存都在起点镜像上追加一个增量层**，所以「保存镜像 → 用它起新 Notebook → 再保存」这种反复迭代的环境会持续累积层数。`--flatten` 把结果合并成单层，并清除被后续层覆盖或删除的旧内容；它通常需要更多镜像构建时间，但不会延长 Notebook 的 COMMITTING 占用阶段。若本次清理的垃圾文件已存在于旧镜像层，保存时必须使用 `--flatten`，避免旧层仍携带已删除内容；它不能代替保存前的文件检查与清理。固化项目基底镜像、或多轮迭代后收敛环境时也用 `--flatten`；无需清除旧层内容的日常快照可保持默认的分层保存。最终体积和耗时以本次镜像内容为准。
+## 7. Observation & Large File Operations
 
-保存跑到一半要拿回 Notebook 时用 `notebook cancel-save-image <notebook-name>`：即使平台已经报告提交完成，取消仍然生效，Notebook 回到保存前的状态。但半成品镜像会以 `FAILED` 留在镜像目录里，需要按 [`image.md`](image.md) 单独删除。
-
-保存出的镜像才是后续 Notebook / Job / HPC / Ray / Serving 应复用的稳定环境。
-
-普通 Notebook 中 Slurm 命令因无 Controller 报错是正常现象；只有 HPC 任务运行时才具备完整 Slurm 运行环境。
-
-## 7. 观察与清理
-
-| 工具 | 主要回答 |
+| Command | What It Answers |
 | --- | --- |
-| `status` | 平台状态、落在哪个节点及该节点健康、优先级、还能跑多久、挂了哪些官方数据集 |
-| `events` | 平台为什么还没调度、为什么启动失败、生命周期走到哪 |
-| `lifecycle` | 每次启动到停止的运行周期 |
-| `metrics` | GPU / CPU / 内存 / I/O 是否真的在工作 |
-| `exec` / `shell` | 进容器查进程、文件、日志和应用状态 |
+| `notebook status` | Platform state, assigned `Node` and node health, priority, `Auto-stop In` countdown, mounted datasets |
+| `notebook events` | Scheduling delays, image pull progress, startup failures |
+| `notebook lifecycle` | Historical start/stop run intervals for the instance |
+| `notebook metrics` | Historical time-series load (or pass `--now` for an instant GPU/CPU/Memory utilization snapshot) |
+| `notebook exec` / `shell` | Process table, container logs, and filesystem inspection (Notebooks do not have a platform `logs` subcommand) |
 
-Notebook 卡在 `PENDING`、`CREATING` 或启动失败时先看 Events；显示 `RUNNING` 但业务不推进时看 Metrics，再回到应用日志和产物路径。
+### Large Directory Operations on Shared Storage
 
-`metrics` 默认给历史时间序列，回答「这段时间它在不在工作」；判断「此刻还占不占着卡」用 `--now` 的当下快照。定时停止设的计时器由 `status` 的 `Auto-stop In` 回读，这是唯一的回读入口。Notebook 没有 `logs`——它是交互式容器，程序输出在 `exec` / `shell` 里读。
-
-## 8. 大文件操作
-
-大规模 `mv` / `cp` / `rm` 前先探目录形状：顶层 fan-out、一两个巨型子树、百万级小文件对应的策略不同。
-
-| 形状 | 策略 |
-| --- | --- |
-| 顶层 fan-out 大且大小均匀 | 顶层并行处理，控制并发 |
-| 一两个巨型子树 | 先下钻再并行，否则实际只有一路 |
-| 百万级小文件 | 优先使用 `find -delete` 或 `rsync --delete-after` 这类少 fork 的方式 |
-
-超过 20 分钟的操作一律后台运行并写 sentinel；并行度不要无脑拉满，先看文件系统和业务风险。
+Before running large `mv`, `cp`, or `rm` operations on `/inspire/...`, inspect the directory structure first:
+- **Wide top-level fan-out:** Parallelize across top-level subdirectories with bounded concurrency.
+- **One or two massive subtrees:** Drill down a level before parallelizing so workers do not serialize on a single directory.
+- **Millions of tiny files:** Prefer low-fork commands such as `find <dir> -delete` or `rsync --delete-after`. Run operations taking over 20 minutes in the background with a sentinel file.

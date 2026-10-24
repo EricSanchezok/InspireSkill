@@ -1,146 +1,103 @@
-# Job、HPC、Ray、Serving 与 TensorBoard
+# Compute Workloads: Job, HPC, Ray, Serving & TensorBoard
 
-在 GPU Job、CPU HPC、Ray 和 Serving 之间选型，矩阵提交一批任务，或提交后观察 Events / Logs / Metrics / Instances / Status 和训练曲线时看本页。资源目录和 Profile 看 [`resources.md`](resources.md)，镜像看 [`image.md`](image.md)，模型仓库看 [`model.md`](model.md)，官方数据集看 [`dataset.md`](dataset.md)。命令语法和参数以 CLI Help 为准。
+Use this guide to choose between GPU Job, CPU HPC, Ray, and Serving, submit single or batch workloads, manage Serving API keys (`INF_API_KEY`), read TensorBoard curves, and observe running workloads. For quotas and availability, see [`resources.md`](resources.md); for images, see [`image.md`](image.md); for the Model Registry, see [`model.md`](model.md); for official datasets, see [`dataset.md`](dataset.md).
 
-## 1. 先选工作负载类型
+## 1. Choosing the Right Workload
 
-| 目标 | 入口 | 适用边界 |
+| Goal | Workload | When to Use |
 | --- | --- | --- |
-| GPU 后台任务 / 分布式训练 / 批量推理 | Job | 固定 GPU 规模，任务开始后跑到结束 |
-| CPU Slurm 批处理 | HPC | 固定 CPU 规模，预处理、评测、数据流水线 |
-| 弹性 Worker / 长守护 / 流式处理 | Ray | 需要 Head、Driver 和可伸缩 Worker Group |
-| 模型 HTTP 部署 | Serving | 从已注册模型创建在线服务 |
+| Background GPU training, batch inference, or worker pools | `inspire job` | Fixed GPU scale that runs to completion |
+| CPU Slurm batch processing | `inspire hpc` | Fixed CPU scale for preprocessing, evaluation, and data pipelines |
+| Elastic workers, long-lived daemons, or streaming | `inspire ray` | Requires a Ray Head, Driver, and autoscaling Worker Groups |
+| Online HTTP model serving | `inspire serving` | Deploys a registered model version behind an HTTP endpoint |
 
-固定规模 GPU 不要用 Ray；固定规模 CPU 不要用 Notebook 长跑；普通训练 / 预处理不要用 Serving。能跑不等于选型正确。
+Do not use Ray for fixed-size GPU training, do not use Notebooks for long unattended CPU batch runs, and do not use Serving for batch jobs.
 
-## 2. 通用提交判断
+## 2. Pre-Submission Checklist
 
-提交前确认：
+Before submitting any workload:
+1. **Workspace:** Use `CPU资源空间` for CPU HPC and CPU Ray; use `分布式训练空间` for GPU Jobs and Serving.
+2. **Quota & Capacity:** Pick a valid `gpu,cpu,mem` row from `<workload> quota` and verify live capacity with `inspire resources availability` (if full, the workload stays `PENDING` with `FailedScheduling` events).
+3. **Image:** Confirm the image is `READY` and already contains all required dependencies (do not run public internet downloads in offline GPU workspaces).
+4. **Storage & Datasets:** Verify shared storage paths (`/inspire/...`). `job create` and `hpc create` can mount read-only official datasets via `--dataset <name>:<version>` (unsupported on `ray` and `serving`). `job`, `hpc`, `ray`, and `serving` can also mount the project public directory read-only (`--public-path-readonly`) to prevent accidental writes.
+5. **Dry-run:** Run `<workload> create --dry-run` (or `<workload> batch <file> --dry-run`) to inspect the resolved plan before submitting.
 
-1. Workspace 与 Workload 类型一致：CPU / HPC / 公网准备用 `CPU资源空间`，GPU 训练 / Serving 用 `分布式训练空间`。
-2. Quota Live 查询能找到目标 `gpu,cpu,mem`。
-3. Image 已 `READY`，且环境在相同角色的 Notebook 或小规模任务里验证过。
-4. 代码、数据、权重和输出路径在目标项目共享盘可见。
-5. 复杂调度条件先 `dry-run` 或小规模 Probe。
+## 3. GPU Job (`inspire job`)
 
-Job 和 HPC 可以在创建时用 `--dataset <数据集名>:<版本名>` 只读挂载数据广场的官方数据集，语义见 [`dataset.md`](dataset.md)；Ray 和 Serving 不支持，需要数据时走共享盘。三类 Workload 都能把项目公共目录降级为只读，用于防止批量任务误写共享结果，默认不开启。
+`inspire job` runs single-node and multi-node GPU workloads (distributed training, batch inference, or concurrent worker pools):
 
-提交前想知道「这个规模到底放不放得下」，看 `resources availability`：它按计算组给出空余卡数和整节点空闲数，而任务正是提交到某个计算组的。集群占满时任务停在 `PENDING` 并伴随 `FailedScheduling` 事件。Workspace 的配额天花板不用planning——它要么无限，要么是集群容量的两倍，详见 [`resources.md`](resources.md)。
+- **Multi-node Jobs require full 8-GPU nodes:** When `--nodes n` (`n > 1`) is set, `--quota` must be an 8-GPU full-node spec, giving `n × 8` GPUs total. Partial-node multi-node jobs (`n × 2`, `n × 4`, `n × 6`) are rejected by the platform. Single-node jobs (`--nodes 1`) can use any valid GPU count.
+- **Working directory:** The CLI does not prepend `cd` to your launch command. Explicitly `cd /inspire/...` in `--command` if your script expects a specific directory.
+- **Shared memory (`--shm-size <GiB>`):** Configures per-instance `/dev/shm` (IPC memory for PyTorch DataLoader workers and NCCL) and cannot exceed the `mem` in `--quota gpu,cpu,mem`.
+- **Environment variables:** Passed via repeatable `-e KEY=VALUE` flags and injected by the platform (the CLI echoes only variable names, never values).
+- **Container retention:** Containers are released immediately upon completion by default. Set `--keep-after-success-hours` or `--keep-after-failure-hours` at creation time to hold the container in a retained state after exit so you can inspect it with `job shell`.
+- **Notifications & fault tolerance:** Status notifications (`--enable-notification`, sent to the user's bound Feishu account) and automatic fault-tolerance retries are off by default. Account-level defaults for `shm`, notifications, and fault tolerance can be set under `[job]` in the account `config.toml` or via environment variables; scheduling parameters (`workspace`, `project`, `group`, `quota`, `image`) must always be passed explicitly.
+- **Node placement:** Use repeatable `--exclude-node <name>` to avoid bad hosts, or `--specified-node <name>` to pin a job to specific nodes in the Compute Group (cannot overlap). `--specified-node` checks the Workspace's live `train_enable_specified_nodes` capability before submitting.
+- **Idle reclamation & priority:** Workspaces reclaim running Jobs whose GPU utilization stays below policy thresholds (`inspire resources policy --workspace <name>`). Check row-level priority restrictions in `job quota` (`Priority` column: `low` requires `--priority 1`; see [`resources.md`](resources.md#4-quotas-priorities--budgets)).
 
-离线 GPU 空间不要在启动命令里做公网下载。公网内容提前准备；内部源依赖可在目标 Notebook 验证后保存镜像。
+## 4. CPU HPC (`inspire hpc`)
 
-## 3. GPU Job
+HPC has a two-layer resource model:
+1. **Node layer (`--quota`, `--nodes`):** Hardware allocated per node (CPUs, memory) and number of nodes in the dedicated Slurm cluster.
+2. **Slurm layer (`--number-of-tasks`, `--cpus-per-task`, `--memory-per-cpu`):** How Slurm subdivides those nodes into tasks.
 
-Job 覆盖 GPU 多节点工作负载，包括分布式训练、批量推理和并发单节点 Worker Pool。它是 GPU 路径；HPC 是 CPU Slurm 路径。
+### Pre-Flight Validation & Resource Boundaries
 
-Job 的关键边界：
+- **Client-side validation:** The platform does not cross-check the Slurm layer against the node layer. `hpc create` blocks three invalid combinations before submission:
+  1. `--cpus-per-task` exceeding a single node's CPUs (fails silently after launch).
+  2. Per-node task memory (`tasks_on_node × cpus_per_task × memory_per_cpu`) exceeding a single node's memory (fails silently after launch).
+  3. Total requested task CPUs (`number_of_tasks × cpus_per-task`) exceeding total allocated cluster CPUs (causes the job to report `RUNNING` while Slurm steps sit queued forever until killed by the Workspace runtime limit).
+  When `--cpus-per-task` or `--memory-per-cpu` are omitted, the CLI derives safe values from the node quota and task count.
+- **Memory is specified per CPU (`--memory-per-cpu`):** Never use the web console's "memory per node" field — its script generator still emits an empty `#SBATCH --mem-per-cpu=` line, causing every job to fail.
+- **Respect cgroup limits, not host `nproc` / `free`:** Inside the container, `nproc` and `free` may report the physical host (e.g., 64 cores), while actual limits are enforced by the Pod cgroup (`cpu.max` and `memory.max` equal to `--quota`). Always size worker pools and buffers from `SLURM_CPUS_PER_TASK` and the `--quota` memory rather than auto-detecting host cores, and leave headroom for `slurmd` and the Python interpreter to avoid sudden cgroup OOM `SIGKILL`s.
+- **Always launch work with `srun`:** The entrypoint (`-c`) is the Slurm script body (do not include `#!/bin/bash` or `#SBATCH` headers). If you omit `srun`, `sbatch` runs your command only on the first node, leaves all other nodes idle, and still reports `SUCCEEDED` with `Steps: 0/0`. Check `Steps` in `hpc status` (`1/1` vs `0/0`) to confirm Slurm steps actually ran.
+- **Image & retention:** The selected image must include a working Slurm runtime (the platform image catalog does not filter for Slurm support). After finishing, HPC jobs briefly enter `SUCCEEDED_RETAINING` or `FAILED_RETAINING`; wait ~1 minute for the job to reach a terminal state before running `hpc delete` (`hpc stop` does not clear the retaining state).
 
-- **多节点 Job 只能按 8 卡满节点提交。** `--nodes n`（`n > 1`）时，每个节点选择的 `--quota` 必须是 8 GPU 规格，任务总规模固定为 `n × 8` 卡；平台不支持每节点只用 2 / 4 / 6 卡的 `n × 2`、`n × 4`、`n × 6` 多节点 Job。单节点 Job 不受这条限制。
-- CLI 不在 Job 启动命令前注入 `cd`：命令保留平台或镜像的初始工作目录。依赖固定目录时，让启动命令显式 `cd /inspire/...`。Notebook `exec` / `shell --cwd` 同样只接受绝对远端路径，需要缩写时由本地 shell 环境变量展开。
-- Shared Memory 是每个 Job Instance 的 `/dev/shm` / IPC 资源，不等同于 `--quota gpu,cpu,mem` 里的 `mem`，但不能超过该 `mem`。PyTorch DataLoader Workers、多进程数据管线或大模型训练需要更大 `/dev/shm` 时，用 `--shm-size <GiB>` 显式设置。
-- 环境变量由平台注入，不必再拼进启动命令；值可能是凭据，CLI 输出只回显变量名。
-- 训练曲线走独立的 `inspire tensorboard` 命令组，不是 Job 的附属字段，见本文第 9 节。
-- 任务结束后容器默认立即释放。需要事后进容器看现场时，在创建时设置成功 / 失败保留时长，任务会停在保留态等待，过期自动释放；这是排查失败训练最省事的路径，比重跑一次便宜。
-- 状态变化通知（`--enable-notification`，收件人固定为当前用户绑定的飞书账号）和自动容错默认关闭，除非明确启用。
-- Shared Memory、通知和容错这类账号行为默认值可写在当前账号配置的 `[job]` 段，或用同名环境变量临时覆盖；调度条件仍每次显式传入。提交前用 `job create --dry-run` 检查最终生效值。
-- 多节点训练要关注每个 Pod 的 GPU、显存、CPU 和网络曲线是否同步；某个 Worker 长期低负载通常比日志更早暴露问题。
-- 节点放置有两个相反的选项：`--exclude-node <名字>` 排除坏节点；`--specified-node <名字>` 把任务绑定到指定节点。两者都可重复，节点名来自所选 Compute Group，同一个节点不能同时指定和排除。指定节点前 CLI 会读取 Workspace 的 `train_enable_specified_nodes` 能力位；未开启时在本地报错，不发送创建请求。两组最终值都由 `job create --dry-run` 回显。
-- Workspace 会按 GPU 利用率与时间规则回收运行中的任务，具体阈值和时限由目标 Workspace Live 策略决定。长时间不吃卡的阶段（大规模数据预处理、CPU 侧评测、等待外部服务）留在 GPU Job 里可能被自动回收，提交前用 `inspire resources policy --workspace <名字>` 读当前规则。
+## 5. Ray (`inspire ray`)
 
-优先级合同——公平调度 Workspace 只接受 `1=LOW`（可抢占）或 `4=HIGH`（默认，稳定档），其他 Workspace 是 `1–10`（默认 10），项目策略还可能再压低一档——见 [`resources.md`](resources.md)。任务需要稳定训练但 Status 显示 LOW 时，先 stop，再按当前 Workspace 和项目策略重提。
+Use Ray only when your workload genuinely needs autoscaling Worker Groups, long-running actors, heterogeneous workers, or streaming pipelines. A Ray cluster stays alive and consumes quota until the Driver exits or you run `ray stop`.
 
-平台还会逐行限制 Quota 能用的优先级，`job quota` 的 `Priority` 列显示这条声明：`low` 的行只接受 `--priority 1`（可抢占），`any` 不受这层限制，`unknown` 表示这次没读到。`job create` 在发出创建请求前按这一列预检并说明改法，细节见 [`resources.md`](resources.md)。限制按每个 Job Instance 的 Quota 判断，不按 `quota.gpu × --nodes` 的任务总卡数判断；多节点 Job 的每个 Instance 固定使用一条 8 GPU 满节点 Quota，例如 `--nodes 2` 是两个 8 卡 Instance、总计 16 卡。提交后用 Status / Events 核实解析后的优先级和调度结果。
+- **Requirements:** The image must contain the Ray runtime, and the Compute Group must support Ray (only groups supporting Ray appear in `ray quota`).
+- **Autoscaling history (`ray scaling`):** Lists every replica count change (`initialized`, `scale_up`, `scale_down`) per Worker Group (`--group` filters to a specific role). An empty history means the group stayed at its initial replica count the entire time.
+- **Restarting stopped clusters (`ray start`):** Stopped Ray jobs retain their Head, Worker Group, and Driver configuration and can be restarted in place with `ray start`. Because the platform API sometimes returns HTTP 200 without actually transitioning the cluster out of `STOPPED`, `ray start` polls until the status leaves `STOPPED` and reports an error if it does not move. Jobs that never reached `RUNNING` should be recreated rather than restarted.
 
-## 4. HPC
+## 6. Serving (`inspire serving`)
 
-HPC 有两层资源模型，不能混：
+Serving deploys a registered model version (from `inspire model`) as an online HTTP service:
 
-| 层级 | 含义 |
-| --- | --- |
-| 节点级 | 每个节点的 GPU / CPU / 内存，以及申请多少个节点 |
-| Slurm 级 | 程序如何在这些节点内拆 task、CPU 和内存 |
+1. **Preparation:** Confirm the model version is ready (`model status`), check the minimum hardware spec (`model deploy-config`), pick a Serving quota (`serving quota` / `serving configs`), and verify that the image contains the serving framework.
+2. **Lifecycle:** Create with `serving create` or `serving batch`; observe with `serving list|status|events|instances|logs|metrics|api-metrics`; control with `serving stop|start|scale|rollback|delete`.
+3. **Scaling & rollback:**
+   - `serving scale <name> --replicas N` adjusts replica count in place (each replica consumes a full quota unit; check `resources availability` before scaling up).
+   - `serving versions` lists deployment configuration revisions, and `serving rollback --version V` redeploys a previous revision (replacing running replicas).
+   - **`serving scale-history`** records every manual or automatic replica count change over time. If latency or throughput shifts without a new deployment revision in `versions`, check `scale-history` and align it with `api-metrics`.
+4. **Resource metrics vs. API traffic metrics:**
+   - `serving metrics` shows container GPU, CPU, and memory usage.
+   - `serving api-metrics` shows request QPS, success/failure rates, latency, and token throughput — the only way to distinguish "nobody is calling the service" from "every request is failing".
+5. **Startup failures:** Check `serving events` (which merges deployment-level and instance-level events by default). Readiness probe failures appear only as instance-level `Unhealthy` events while deployment-level events merely show `GroupsProgressing` or `Pending`.
 
-两层之间**平台不做任何校验**，控制台也不做：`hpc create` 因此在提交前自己挡下三种必然跑不起来的组合——单个任务要的 CPU 超过一个节点、单节点上所有任务的内存超过节点内存、任务总数乘每任务 CPU 超过买下的节点总核数。前两种在平台上的表现是起来后一两分钟内就 `FAILED`，且 `logs` 和 `events` 都不带原因；第三种更隐蔽，平台一直报 `RUNNING`，Slurm 里的 step 却永远排队，直到 Workspace 的运行时长上限把它停掉。`--cpus-per-task` / `--memory-per-cpu` 不给时按「一个节点上落几个任务」推导，所以只调 `--number-of-tasks` 不会再造出上面第三种。
+### Calling Endpoints & Managing API Keys (`INF_API_KEY`)
 
-内存只按每 CPU 给（`--memory-per-cpu`，Slurm `--mem-per-cpu`）。网页端另有「每节点使用内存」输入框，**它是坏的**：平台收下并在详情页显示这个值，但生成脚本时只写 `--mem-per-cpu`，于是那一行是空的，任务必然失败。不要在网页端用它，CLI 也不提供对应选项。
-
-**容器里量到的宿主机资源不是任务配额，程序不能照着 `nproc` / `free` 自动调档。** 真实约束在 Pod cgroup 的 `cpu.max` 与 `memory.max`，而部分工具和库仍可能看到宿主机总量并据此放大进程数或缓冲区。**并发度和缓冲区显式取自 `SLURM_CPUS_PER_TASK` 和 `--quota` 的内存数**，不要让 `multiprocessing.cpu_count()`、OpenBLAS 或 PyTorch 默认值替你猜。
-
-**内存墙是节点规格，不是 `--memory-per-cpu` 的记账量，而且要留出运行时自身的占用。** cgroup 的 `memory.max` 等于 `--quota` 的节点内存，不随 `--memory-per-cpu` 变化；Slurm 这一层的内存字段只进记账，不设置容器运行时上限。进程贴到 cgroup 上限时会被 OOM 直接 SIGKILL，日志可能一行都来不及写。所以按 `--quota` 规划峰值，并给解释器、shell 和 slurmd 自身留出余量。
-
-关键约束：
-
-- 入口命令只写 Slurm 正文，程序必须显式 `srun` 启动。**没有 `srun` 的正文照样跑完并报 `SUCCEEDED`**——sbatch 会在第一个节点上执行它——只是不产生 Slurm step，多节点时其余节点全程空转。`hpc status` 的 `Steps` 是唯一能看出这件事的字段：`0/0` 表示没有 step，`1/1` 表示 step 跑完了。
-- Group 使用完整 Compute Group 名称；并非所有 CPU Compute Group 都支持 HPC。
-- Project 仍从当前 Workspace 的 Live 目录解析；同一条记录同时提供创建所需 ID 与优先级上限，不会为了两个字段重复列目录。
-- 镜像必须带可用 Slurm 运行环境；平台的镜像列表不按这一点过滤，选错了不会有任何提示。
-- `status=SUCCEEDED` 不等于业务产出完整；先看 `Steps`，再写 Fingerprint，从同项目 Notebook 回读产物。
-- 结束后有一段 `SUCCEEDED_RETAINING` / `FAILED_RETAINING` 保留态，此时 `hpc delete` 答「当前状态（运行中）无法删除」，`hpc stop` 也解除不了——等它自己转成终态（约一分钟）再删。
-
-## 5. Ray
-
-默认不要使用 Ray，除非任务明确需要弹性 Worker、长守护、流式处理或异构 Worker。Ray 集群由 Driver / Head / Worker Group 组成，Driver 不退出就会一直占资源。
-
-Ray 特有风险：
-
-- 镜像必须带 Ray Runtime。
-- Head 和 Worker Quota 用 Ray 专属规格表。
-- Worker 的 `min` / `max` 决定资源占用上限；长守护任务要接受手动 stop 的运维模型。
-- 如果只是固定规模训练或固定 CPU 批处理，回到 Job / HPC。
-
-创建后用 `ray events` 看调度、`ray instances` 看 Head 与实际 Worker、`ray logs` 看程序输出、`ray metrics` 看各组负载；结束后先 `ray stop`，确认不再需要再 `ray delete`。重复配置用 `ray profile`，矩阵提交用 `ray batch`。
-
-弹性本身用 `ray scaling` 看：每行是平台对某个 Worker Group 做的一次副本数变更，从 `initialized` 起，之后每次 `scale_up` / `scale_down`。**空的历史表示这个弹性区间从来没被用到**——组一直跑在起始副本数上，那通常说明 `min` / `max` 设了却没有触发条件，或者这个任务本来就不需要 Ray。`--group` 收窄到某一组，组名与 `ray status` 和 `ray instances` 的 Role 列一致。
-
-停掉的 Ray Job 保留完整集群规格，`ray start` 用原样的 Head、Worker Group 和 Driver 命令拉回来，不需要重新指定。平台在这里会「受理但不执行」——请求返回成功而任务纹丝不动，所以 `ray start` 以状态真的离开 `STOPPED` 为准，没动就报失败。从未真正 `RUNNING` 过的 Job 通常起不来，重建比重试可靠。
-
-支持 Ray 的 Compute Group 是 CPU 组里很窄的一部分。`<workload> quota` 现在只列出真正受理该 Workload 的组——每个组自己声明支持哪几类任务，按这个过滤，所以看到的档位就是能提交的档位。
-
-## 6. Serving
-
-Serving 面向模型部署服务。通常先用 Model Registry 找到模型和版本，再创建自定义部署。
-
-创建前确认：
-
-- 模型目录已经注册，目标版本状态可用。
-- 镜像里有服务 Runtime 和启动命令所需依赖。
-- 端口、健康检查和业务 Smoke Test 明确。
-- 资源规格来自 Serving Quota，而不是训练 Job Quota。
-- 调用者已准备平台 API Key；自定义应用有额外鉴权时，还需满足应用本身的要求。
-
-LLM 专属部署、Serverless LLM 和模型广场一键部署有不同平台类型；普通 Custom Serving 不要推导它们的字段。
-
-当前 Custom Serving 生命周期是：`serving configs` / `serving quota` 选配置，`serving create` 或 `serving batch` 创建，`serving list/status/events/instances/logs/metrics` 观察，`serving stop` / `serving start` 控制，最后 `serving delete` 清理。每次创建显式传入调度条件；批量创建使用 `serving batch`。
-
-副本数用 `serving scale` 调整，其余配置原样保留；每个副本各占一份完整规格，扩容前先看 `resources availability`。历史配置用 `serving versions` 列出，`serving rollback --version` 按某个历史版本重新部署——副本会被替换，在途请求和重启一样会断。
-
-**没有重新部署过、延迟或吞吐却变了，先看 `serving scale-history`。** 它按时间列出副本数每一次变化和变成了多少；掉下去的副本数、或者一次没落地的自动伸缩，只会出现在这里，`versions` 里一个字都没有。把它和 `api-metrics` 的时间线对齐，就能确认这次变化解释不解释得了那段流量。
-
-两套指标不要混：`serving metrics` 看 GPU / CPU / 内存这类资源占用，`serving api-metrics` 看请求量、成功率和延迟。「没人调用」和「一直调用一直失败」只有后者分得清。
-
-部署起不来时事件比日志先有线索，而且要看到实例级那一半：`Unhealthy` 是「副本起来了但健康检查一直不过」这个最常见故障的唯一署名，它只出现在实例级事件里，部署级只会说 `GroupsProgressing` / `Pending`。默认的 `serving events` 已经把两级合成一条时间线，不用再加开关。
-
-### Serving 调用与 API Key
-
-`serving list/status` 返回平台分配的 Endpoint；列表中的已校验地址完整显示，不清洗域名中的句柄或截断长地址。创建成功时会尝试读取 Endpoint，尚未取得则提示稍后查询。地址在停止状态也可能保留，所以看到地址不代表服务已就绪。用 `serving api <name> --workspace <workspace>` 查看完整地址、服务类型和调用说明；`--format curl` 只生成示例，不发送请求、不获取密钥，`--json` 返回单一结构化结果。
-
-密钥由 `account api-key` 管理，属于选定账号，和 `serving create` 的部署配置分离。`list` 只展示名称和创建时间；`create --name` 创建新密钥；`delete` 会撤销密钥，使用它的客户端会失去访问权。同名密钥用 `--pick` 消歧。创建或删除显示 confirmation pending 时，先重新查询列表确认结果，避免重复创建。参数以相应 Help 为准。不要在未确认消费者时删除既有密钥。
-
-网页示例的 `INF_API_KEY` 是**调用者**保存 API Key 的环境变量，HTTP 请求使用 `Authorization: Bearer $INF_API_KEY`。这不要求把密钥放到 Serving 容器，也不是 `serving create` 的额外参数。按客户端的加载方式选择导出目标：
+- **Inspecting endpoints:** `serving list` and `serving status` display the platform-assigned endpoint URL (note that a URL can remain visible while the service is `STOPPED`). Run `inspire serving api <name> --workspace <workspace>` to view the full endpoint, service type, and invocation details (`--format curl` prints a ready-to-use `curl` template without sending a request or fetching secret keys; `--affinity-key <session-id>` adds the `x-inspire-inference-key` header for best-effort node affinity).
+  - `CUSTOM` deployments expose whatever HTTP path, method, and payload your container listens on (the CLI prints a base root-URL `curl` template without assuming OpenAI compatibility).
+  - Platform `EXCLUSIVE` / `SERVERLESS` deployments use `/v1` base URLs and `/v1/chat/completions`.
+- **Managing API keys (`inspire account api-key`):** Inference API keys belong to the selected account and are sent by callers as `Authorization: Bearer $INF_API_KEY` (they are not passed to `serving create` or stored inside the Serving container).
+  - `account api-key list` shows key names and creation timestamps.
+  - `account api-key create --name <name>` creates a new key; `account api-key delete <name>` revokes it (check consumers before deleting).
+  - Export or inject a key without exposing it in normal CLI output:
 
 ```bash
-# 新建标准 .env 文件：INF_API_KEY=密钥
+# Write a new .env file (0600 on POSIX, current-user-only ACL on Windows; never overwrites existing files)
 inspire account api-key export my-key --format dotenv --output .env
 
-# 当前 Bash / Zsh 接收明文输出，保存为环境变量
-# 分开赋值与 export，确保取密钥失败时不会被 export 的成功状态掩盖
+# Capture into the current Bash / Zsh shell environment
 INF_API_KEY="$(inspire account api-key export my-key --stdout)" && export INF_API_KEY
 
-# 只给启动的客户端进程注入环境变量，CLI 不打印密钥
+# Inject directly into a child process without printing the key
 inspire account api-key run my-key -- python client.py
 ```
 
-PowerShell 的当前进程环境变量可用以下方式设置；先检查命令状态，避免失败后继续使用空值：
+In PowerShell:
 
 ```powershell
 $key = inspire account api-key export my-key --stdout
@@ -148,85 +105,55 @@ if ($LASTEXITCODE -eq 0) { $env:INF_API_KEY = $key }
 Remove-Variable key
 ```
 
-CLI 子进程不能直接修改父终端的环境变量。`run` 继承当前环境并覆盖 `INF_API_KEY`，传播客户端退出状态，父终端保持原值；客户端输出直接继承到终端，客户端自身不要打印密钥。`--env-name APP_API_KEY` 可更换目标变量名。`export --format raw|dotenv|sh|powershell` 分别生成纯密钥、`.env` 赋值、POSIX shell 赋值或 PowerShell 赋值；选择 `--output` 或 `--stdout` 之一。默认 `raw` 含密钥及末尾换行；shell 格式按对应语法引用字面值；dotenv 仅接受无需引用且不会触发变量展开的值，遇到不明确的转义规则会拒绝并提示改用 raw 或 shell 格式。
+`export` supports `--format raw|dotenv|sh|powershell` and `--env-name <VAR>` with either `--output <file>` or `--stdout` (`--stdout` cannot be combined with `--json`). Inference API keys authenticate calls to Serving endpoints and applications; they are separate from user-center object-storage AccessKeys and SSH public keys.
 
-文件导出在 Linux / macOS 使用 `0600`，Windows 原生环境通过 PowerShell 设置并读回校验仅当前用户的受保护 ACL；无需 WSL。Windows 缺少 PowerShell 时，在获取明文前提示替代方式；文件系统不能满足权限或原子发布要求时导出失败。所有格式都只创建新文件，不覆盖、合并或追加已有 `.env`，也不覆盖符号链接。显式 `--stdout` 会输出明文，应由 shell 捕获；不能与 `--json` 同用。普通命令输出、文件导出结果及 JSON 均不含密钥。不要开启 shell tracing、打印变量或把导出文件提交到仓库。
+## 7. Batch Submission (`<workload> batch`)
 
-控制台 API Key 创建弹窗声明“可通过 API Key 访问推理服务和应用”，没有可选的逐服务、项目或用途权限范围。已确认的调用合同是推理服务的 Bearer 鉴权；这不等于通用管理 API 凭据。用户中心的 AccessKey（带所属项目、BucketName）和 SSH 公钥是独立入口，不能用 API Key 替代。网页“应用”的独立调用协议尚未确认，不能据此推导 Notebook、Job、存储或管理接口都接受该 Bearer Key。
+To submit a sweep of `job`, `hpc`, `notebook`, `ray`, or `serving` workloads that vary by name, command, or arguments, use `<workload> batch <file.json|file.toml>` instead of shell loops:
+- Top-level `defaults` and `matrix` expand variants, while every expanded item must explicitly include `workspace`, `project`, `group`, `quota`, `image`, and workload-required fields (`profile` / `profiles` keys are rejected).
+- Batch items accept the full set of `create` options (datasets, `env` as a list or key-value table, retention hours, fault tolerance, runtime limits, notifications, read-only mounts).
+- Always run `<workload> batch <file> --dry-run` first to validate the expanded items and dataset mounts before creating anything.
+- Within a single `job`, `hpc`, or `notebook` batch invocation, live quota priority menus, project catalogs, image catalogs, and successful `(workspace, dataset, version)` validations are fetched once per Workspace and reused across items in that run.
 
-`x-inspire-inference-key` 是可选的请求 Hash Key，平台声明相同值的请求会路由到同一节点；它不承担鉴权。需要亲和性时通过 `serving api --affinity-key <业务会话标识>` 生成对应 Header。扩缩容或故障期间的映射稳定性没有额外保证，不能据此假定应用状态永远留在同一副本。
+## 8. Observation & Debugging Loop
 
-CUSTOM 服务的业务路径、HTTP 方法和请求体由容器决定，生成器只提供根地址的基础 curl 模板，不宣称 OpenAI 兼容。平台 EXCLUSIVE / SERVERLESS 类型的示例使用 `/v1` base URL 和 `/v1/chat/completions`；部署是否就绪及模型是否满足业务要求仍须由调用方验证。
-
-Endpoint 只接受当前已确认的无凭证 HTTP(S) origin；含 userinfo、query、fragment 或未知路径结构的地址不会输出，应核对平台新合同后再扩展支持，不能手工拼接域名替代。
-
-## 7. 矩阵提交（Batch）
-
-要提交一批只差名称、命令或输入输出路径的 Workload 时，用 `<workload> batch <文件>` 而不是循环调 `create`。五类都有：`job` / `hpc` / `notebook` / `ray` / `serving`。文件是 JSON 或 TOML，顶层是该 Workload 的条目列表，可选的 `defaults` 和 `matrix` 只用于复用非调度字段和展开变体。展开后的每一条都必须显式带齐 `workspace`、`project`、`group`、`quota`、`image` 以及其它 `create` 必填字段；顶层或 item 里出现 `profiles` / `profile` 会直接报错。
-
-**Batch 条目的字段与 `create` 严格对齐**，不是它的弱化版：数据集挂载、环境变量、描述、成功 / 失败保留时长、容错重试间隔、运行时长上限、状态通知和只读挂载都能写进条目。`dataset` 收一条 `"<名字>:<版本>"` 或一个列表，`env` 除了 `KEY=VALUE` 列表还接受表——TOML 和 JSON 表达映射比拼接字符串自然。`ray` 和 `serving` 的条目不收数据集（平台拒绝该字段）。
-
-先跑 `--dry-run`：它展开矩阵、逐条解析并打印计划而不提交任何东西，是唯一能在提交前核对最终生效值的入口。数据集在条目准备阶段就完成校验，所以一个拼错的 spec 会在任何东西提交之前中止整个 Batch，而不是等前几条已经跑起来才发现。
-
-Job / HPC / Notebook Batch 对同一 Workspace 的 Quota 优先级菜单、Project 目录与拥塞判断，以及同一镜像来源目录，只在本次命令里读取一次并供后续条目复用。它仍是命令启动后刚取得的 Live 快照，不写进持久配置，也不跨命令沿用；矩阵条目越多，省掉的重复请求越多。
-
-同一 Batch 里重复挂载的官方数据集也按 `(Workspace, dataset, version)` 只校验一次，成功后供后续条目复用；拒绝、超时或其它失败不会进入快照，下一次条目仍会重新向平台确认。
-
-## 8. 观察闭环
-
-| 工具 | 主要回答 |
+| Command | Primary Question Answered |
 | --- | --- |
-| `events` | 为什么排队、为什么启动失败、调度器或控制器拒绝了什么 |
-| `logs` | 程序自身报错、训练进度、业务输出 |
-| `metrics` | 已启动任务是否仍在有效工作，Pod / Task / Replica 是否均衡 |
-| `instances` | 实际运行单元是否齐全，是否有部分 Pending 或异常；每个 Pod 落在哪个节点 |
-| `status` | 平台状态、优先级、基础摘要、落在哪些节点、挂了哪些官方数据集 |
-| `job command` | 这个任务当初到底是用什么命令跑起来的——复现实验和对比两次运行时先读它 |
-| `inspire tensorboard scalars` | 训练本身写出来的曲线：loss 还在不在降、eval 指标有没有走平（见第 9 节） |
+| `events` | Why is the workload queued, failing to schedule, or failing to start containers? (Merges controller and pod events by default; use `--instance` or `--workload-level` to narrow.) |
+| `logs` | What did the application print? (Aggregates all instances by default; use `--instance` to filter. For Notebooks, use `exec` / `shell`.) |
+| `metrics` | Are GPUs, CPUs, memory, and network actually active and balanced across Pods/replicas? (Queried one workload at a time.) |
+| `instances` | Which Pods/roles are running, and which physical `Node` is each rank placed on? |
+| `status` | Platform status, effective priority, assigned `Nodes`, and mounted datasets. |
+| `job command` | Exact launch command used when the Job was submitted. |
+| `shell` | Interactive PTY inside a running container (`exit` to quit, `Ctrl+]` to detach). Defaults to `launcher` on HPC, `head` on Ray, first running replica on Serving, or `--instance <label>`. |
+| `tensorboard scalars` | Training loss and evaluation curves written to shared storage (see Section 9). |
 
-卡住或失败先看 Events；已启动但健康度不明看 Metrics；程序行为看 Logs；产物完整性回到共享盘文件和 Fingerprint。上面五个都在回答「平台侧这个任务怎么样」，回答不了「模型训得怎么样」——那是 TensorBoard 那一条。
+### Multi-Workload Queries & Waiting
 
-**一批任务一起看**：`job status`、`hpc status`、`job events` 都可以直接跟多个名字，平台按每 20 个一次请求作答，比挨个问快得多——扫一批矩阵实验的状态时用这个，别写 shell 循环。多任务的 `job events` 合成一条按时间排好的时间线，多出一列 `Job` 指明每行来自哪个任务；它只给控制器级事件，因为 Pod 级事件要按任务各列一次实例清单，本来就省不掉，所以那是单任务查询（`--instance` 同理只对单个名字有意义）。一个答不上来的名字**不会中断整条命令**：能答的照常打印，答不了的以 `Unresolved:` 单独列出并说明原因（打错、已删、或一个名字对上了好几个任务），退出码同时告诉脚本这份答案是残缺的——所以批量结果**不能只看 stdout 有几行就当全**。
+- **Batch status & events:** `job status`, `hpc status`, and `job events` accept multiple workload names in a single command (fetched in chunks of 20). Unresolved names (typos, deleted jobs, or ambiguous names) are listed under `Unresolved:` with a non-zero exit code without aborting the resolved items.
+- **Cross-workspace search:** When you do not know which Workspace a Job is in, run `inspire job list --workspace all` (queries up to 8 Workspaces concurrently in round-robin pages).
+- **Waiting for completion:** Only wait on workloads in non-terminal states (`PENDING`, `QUEUING`, `RUNNING`). Stopped Jobs (`CANCELLED`) and HPC jobs cannot be restarted (`start` only exists on Notebook, Ray, and Serving). `job wait` and `job logs --follow` exit automatically when the Job reaches a terminal state; `events --follow` and `job list --watch` stream indefinitely until interrupted — do not use them as completion barriers.
 
-不知道 Job 在哪个 Workspace 时用 `job list --workspace all`；它按页对可见 Workspace 做 8 路有界 round-robin，而不是把每个空间串行相加。输出仍按全局 `--limit` 截断，`--all` 才完整翻页。
+## 9. TensorBoard (`inspire tensorboard`)
 
-指标没有等价批量口径：平台的 `GetTaskMetricBatch` 会丢失多 Pod 分组，部分 I/O 指标返回空或报错，其余聚合值也与控制台使用的单任务端点不一致，所以 `metrics` 仍是一次一个任务。
+TensorBoard is a standalone platform resource (`inspire tensorboard create|list|status|start|stop|delete|tags|scalars`):
+- **Fixed spec (1 CPU / 2 GiB):** No `--quota` or `--image` is needed. You only choose `--workspace`, `--project`, `--group` (must be a Compute Group that declares `tensorboard` support), and `--summary-path <remote-dir>`.
+- **`--job <name>` is optional metadata:** Associates the board with a training Job in the UI but does not infer `--summary-path`.
+- **Auto-stop:** Defaults to 24 hours (up to `--auto-stop-hours 72`). Stopped boards can be restarted with `tensorboard start` without re-entering paths. Deleting a board requires `tensorboard stop` first and never deletes event files on shared storage.
+- **Reading curves without a browser (`tags` & `scalars`):**
+  - `inspire tensorboard tags <name>` lists all runs and scalar tag names. (An empty tag list means either no event files exist yet or `--summary-path` is wrong.)
+  - `inspire tensorboard scalars <name>` returns start/end values, step ranges, and min/max values for each curve (sorted by `step`, not file order), plus the last `N` `(step, value)` points when `--points N` is passed.
 
-**等待只对还会自己往前走的状态有意义。** `PENDING` / `QUEUING` / `RUNNING` 会动，终态不会：Job 和 HPC 没有 `start`，`job stop` 留下的 `job_stopped` 与 `SUCCEEDED` / `FAILED` / `CANCELLED` 一样是终点，要再跑只能重新 `create`；能从停止态拉回来的只有 Notebook、Ray 和 Serving，它们各有 `start`。所以开始等之前先 `status` 读一次当前状态，别对着一个已经停掉的任务等它变回运行中。`job wait` 和 `job logs --follow` 在任务进入终态时返回；`events --follow` 和 `job list --watch` 不会自己结束，任务结束了也不会，只能被中断——不要把这两条挂在后台终端上当「等任务跑完」用。
+## 10. Common Failure Patterns
 
-节点归属分两层，两层都是 Live 事实，任务离开运行态就清空：`status` 给任务级的节点清单（`job` 的 `Nodes` / `Pinned Nodes` / `Excluded Nodes`、`hpc` 与 `serving` 的 `Nodes`、`notebook` 的 `Node` 带节点健康），`instances` 给 Pod 级的 `Node` 列。多节点任务定位掉队的那一个 Worker 用 `instances`，因为只有它把 rank 和节点对上；`ray` 的节点归属只有 `instances` 这一层，`ray status` 的 `head_node` / `worker_groups` 是规格不是落点。**空的节点清单读作「还没被调度」，不是「查不到」。**
-
-`shell` 在 `job` / `hpc` / `ray` / `serving` 下都有：把本地 stdin 接到实例里的远端 PTY，`exit` 退出、`Ctrl+]` 断开而不结束 shell。默认进哪个实例按 Workload 定：**HPC 进 `launcher`**——`srun` 在那儿跑，也只有那个 Pod 看得见你的进程，`slurmctld` 是调度器本身，要去得 `--instance slurmctld`；**Ray 进 head**——驱动在那儿，`ray status` 和集群自己的日志也在那儿；**Serving 进第一个运行中的副本**——每个副本跑的是同一个镜像和命令，除非就是某个副本在出问题，那就用 `--instance` 点名。
-
-`logs` 在 `job` / `hpc` / `ray` / `serving` 下都有，共用同一套记录与字符预算和同一份 `--json` schema；Notebook 没有 `logs`，它是交互式容器，用 `notebook exec` 或 `notebook shell` 直接读。日志按实例采集后合并成一条时间线，每行带实例标识（`hpc` / `ray` 用 `instances` 打印的角色或序号，`job` 与 `serving` 用 Rank），`--instance` 只读其中一个或几个。**平台侧根本没有「工作负载级日志」这一层**——日志端点只按 Pod 名取，所以全实例聚合不是选择而是唯一形态。日志记录里另有平台填的 `node` 字段，只在 `--json` 里可见，且不是每类工作负载都填，Pod 与节点的对应关系以 `instances` 的 `Node` 列为准。
-
-`events` 与 `logs` 的默认口径一致：不加参数就是这个工作负载能拿到的全部，`--instance` 收窄到某个实例，`--workload-level` 反过来只留控制器那一半（两者互斥）。四类的默认都把两套不相交的视图合成一条时间线——控制器事件说「任务为什么没被创建、为什么整体排不上」，Pod 事件说「哪个实例没被调度、镜像拉没拉下来、容器起没起来」（`FailedScheduling` / `Pulling` / `Started` / `BackOff`）——并多出一列 `Instance` 指明每行来自哪个实例，控制器行在这一列是 `-`。实例标识与各自 `instances` 一致：`hpc` 与 `ray` 是角色 / 序号，`job` 与 `serving` 是 Rank。取数代价各不相同但对调用方不可见：`job` 一次请求带 200 个 Pod，`ray` 一次调用本来就同时返回两级，`serving` 两级各一次调用，`hpc` 一个实例一次请求、并发取。Notebook 是单实例，两个开关都没有。**排查顺序建议先看默认的合并视图**：只有已经知道问题出在整体调度、不在某个 Pod 上时，`--workload-level` 才值得用——它省掉的是实例那几次请求，不是一次判断。
-
-## 9. TensorBoard
-
-TensorBoard 是平台上的一等对象，不是 Job 的字段：计算组在 `support_job_type_list` 里单独声明 `tensorboard` 这个任务类型，控制台给它独立页签，它既可以挂在某个训练任务上，也可以对任意一个 summary 目录单独建。命令组是 `inspire tensorboard`，`metrics` 那套读的是资源占用，这里读的是训练本身写出来的曲线。
-
-- **规格固定 1 CPU / 2 GiB**，所以没有 Quota 要选、没有镜像要挑；唯一的放置输入是计算组，而且这个组必须声明 `tensorboard`——`分布式训练空间` 里有几个训练组没有声明，选中会被平台拒。
-- **`--summary-path` 是全部**：board 直接读共享盘上已有的 event 文件，训练侧不需要为它改任何东西；同一个目录反复建 board 不会影响文件。
-- **`--job` 只是归属记号**，让 board 出现在那个任务的行上，不会替你推导 summary 路径。
-- **自动停机上限 72 小时**（`--auto-stop-hours`，默认 24），到点自停；`stop` 后 `start` 会重新开始计时，summary 路径和窗口都不用重填。
-- **`tags` 和 `scalars` 直接读运行中的 board**：`tags` 给出 run 和 scalar tag，`scalars` 给出每条曲线的首尾值、step 区间、最小最大值，`--points N` 再加最后 N 个 `(step, value)`。这一层让 Agent 不需要浏览器也能判断 loss 还在不在降、eval 指标有没有走平、某次训练是不是发散了。
-- **点按 step 排序，不按 event 文件顺序**：续训和多 worker 写出来的序列在文件里是交错的，"最后一个点"问的是 step。
-- **运行中的 board 没有任何 tag，和路径写错长得完全一样**——两种情况都只是空列表，要靠核对 `--summary-path` 区分。
-- 删除 board 不动共享盘上的 event 文件，指向同一目录重建一个 board 读到的是同一份数据；运行中的 board 拒绝删除，先 `stop`。
-
-## 10. 异常判断
-
-| 现象 | 优先怀疑 |
+| Symptom | Likely Cause & Next Step |
 | --- | --- |
-| `PENDING` 过久 | 优先级不足、实时配额不足、节点条件不满足 |
-| `CREATING` 卡死 | 镜像拉取失败或节点初始化 |
-| `instances` 部分 Pending | 多节点或多副本调度不均 |
-| `logs` 为空但 `RUNNING` | 主进程未输出、日志路径不在 CLI 管理范围、程序没真正启动 |
-| `FAILED` 但无业务报错 | OOM、显存溢出、节点驱逐或控制器失败 |
-| HPC `Steps` 是 `0/0` 或 `-/0` | Slurm 正文没有用 `srun` 启动程序，只有第一个节点跑了 body |
-| HPC 一直 `RUNNING`、`Steps` 停在 `-/N` | Slurm 级请求超过买下的节点总量，step 在排队；停掉重提，别等 |
-| HPC 程序中途没了、日志断在半截且无报错 | 撞 Pod cgroup 内存墙被 OOM 杀掉；或程序按 `nproc`（报宿主机 64 核）自动开了几十个工作进程 |
-| `SUCCEEDED` 但产物为空 | 程序提前退出、资源贴边或输出路径不对 |
-| Quota Match Failed | Workspace / Group / `gpu,cpu,mem` 三元组不匹配 |
-| 挂在后台的等待命令长期没有任何输出 | 任务早已是终态，等不到它变回运行中；先 `status` 读一次，再决定重新 `create` 还是收工 |
+| Stuck in `PENDING` | Insufficient live capacity, low priority, or node filter mismatch → check `events` and `resources availability` |
+| Stuck in `CREATING` | Image pull failure or node initialization delay → check pod-level `events` |
+| Some `instances` stuck in `Pending` | Gang/multi-node or multi-replica scheduling shortage → check `events` and `Free Nodes` / `High Pri Nodes` |
+| `RUNNING` with empty `logs` | Buffered stdout (`python -u` missing), logs written to a file instead of stdout, or entrypoint hung before printing → check `metrics` and `shell` |
+| `FAILED` with no Python traceback | Container OOM (`SIGKILL`), GPU OOM, node eviction, or controller error → check `events` and `resources node-events <node>` |
+| HPC `SUCCEEDED` with `Steps: 0/0` | Entrypoint omitted `srun`, so commands only ran on the first node → add explicit `srun` |
+| HPC stuck `RUNNING` with `Steps: -/N` | Slurm task CPU/memory request exceeds allocated nodes → `hpc stop` and resubmit with matching quota |
+| HPC log cuts off mid-run with no error | Hit Pod cgroup memory ceiling (`--quota` memory) or spawned too many workers from host `nproc` → size workers from `SLURM_CPUS_PER_TASK` |
+| Background wait command never returns | Target workload was already in a terminal state or using `events --follow` / `list --watch` → check `status` first and use `job wait` |

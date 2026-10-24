@@ -1,64 +1,63 @@
-# Image 管理
+# Image Management
 
-选择已有镜像、注册外部镜像、调整可见性或清理镜像时看本页。**把跑通的 Notebook 固化成镜像不在本页**：那是 Notebook 的生命周期动作（`notebook save-image` / `cancel-save-image`），看 [`notebook.md`](notebook.md)；本页只讲保存出来的镜像之后怎么用、怎么共享、怎么清理。Notebook 内准备依赖同样看 [`notebook.md`](notebook.md)；联网准备和内部源看 [`internal-sources.md`](internal-sources.md)。命令语法和参数以 CLI Help 为准。
+Use this guide when selecting existing images, registering external Docker images, changing image visibility, or cleaning up images. Saving a running Notebook into an image (`notebook save-image` / `cancel-save-image`) is covered in [`notebook.md`](notebook.md#6-base-environments-and-saving-images); internal package mirrors are covered in [`internal-sources.md`](internal-sources.md).
 
-## 1. 镜像的职责
+## 1. Image Responsibilities & Registry Scope
 
-镜像保存“已经装好的运行环境”，用于 Notebook、Job、HPC、Ray 和 Serving 之间复用。数据集、权重、Checkpoint 和批量产物不进镜像，应放在明确的共享盘绝对路径。
+Images store reusable runtime environments for Notebooks, Jobs, HPC, Ray, and Serving. Datasets, model weights, checkpoints, and job outputs belong on shared storage (`/inspire/...`), not inside images.
 
-镜像存在 Registry 里，不是存在 Workspace 里，**多个 Workspace 正常共用同一份 Registry**。`image list` / `detail` / `register` / `set-visibility` / `delete` 都要 `--workspace`，因为平台只认 `registry_hint: {workspace_id}` 这一种指定 Registry 的方式——它是一个指向 Registry 的路标，不是分区。所以 `notebook save-image --workspace X` 存出的镜像，在**同一个 Registry 上的每一个 Workspace** 里都看得到，不必回到 X。
+Images live in a **Registry**, not a single Workspace, and multiple Workspaces commonly share the same Registry:
+- `image list`, `detail`, `register`, `set-visibility`, and `delete` all require `--workspace` because the platform API resolves the target Registry via `registry_hint: {workspace_id}`.
+- An image saved with `notebook save-image --workspace X` is immediately visible in every Workspace that shares `X`'s Registry.
+- Separate hardware domains or dedicated workspaces may point to disjoint Registries. Always check `inspire image list --workspace <target>` in the target Workspace rather than assuming an image exists across registry boundaries.
 
-真正会挡住你的是 Registry 边界。不同硬件域或专属空间可能指向互不相交的镜像目录，跨过边界后同名镜像也不保证存在；哪个 Workspace 能看到哪份目录，始终以该 Workspace 的 Live `image list` 结果为准，不把某个账号当时可见的 Workspace、Registry 名称或目录数量写成通用映射。
+Before using an image for production workloads, verify that:
+- Its status is `READY`.
+- It is visible to the target Workspace and Project.
+- Required runtimes (CUDA, Slurm, Ray, or serving frameworks) have been tested.
+- Caches, temporary build artifacts, credentials, and private data were cleaned prior to saving (see [`notebook.md`](notebook.md#6-base-environments-and-saving-images)).
 
-一个稳定镜像至少满足：
+## 2. Common Operations
 
-- 状态为 `READY`。
-- 目标 Workspace / Project 有权限读取。
-- 训练、HPC、Ray 或 Serving 所需 Runtime 已在同类环境中验证。
-- 保存前已按 [`notebook.md`](notebook.md#6-基底环境与保存镜像) 检查并彻底清理所有多余垃圾文件，没有账号 Token、私有 Wheel、内部数据或临时调试文件。
-
-## 2. 选择路径
-
-| 目标 | 路径 | 判断 |
+| Goal | Command | Notes |
 | --- | --- | --- |
-| 使用官方或已有自定义镜像 | `image list` / `image detail` | 镜像存在、状态可调度、权限可见 |
-| 固化运行中的 Notebook | `notebook save-image`（见 [`notebook.md`](notebook.md)） | 依赖是在平台 Notebook 里装好的 |
-| 纳入外部 Docker 镜像 | `image register` | 镜像在本地、CI 或外部 Registry 构建完成 |
-| 调整共享范围 | `image set-visibility` | 协作者需要复用，或实验镜像应收回私有 |
-| 删除镜像 | `image delete` | 确认没有活跃 Workload 或协作者依赖 |
+| Find an official or custom image | `image list` / `image detail` | Use `--keyword` (case-insensitive substring match) to search large catalogs |
+| Snapshot a running Notebook | `notebook save-image` | Commits the container in place; see [`notebook.md`](notebook.md#6-base-environments-and-saving-images) |
+| Register an external Docker image | `image register` | Reserves a registry slot and returns `docker push` instructions |
+| Change sharing scope | `image set-visibility` | Switch between `private` and `project`, or promote to `public` |
+| Delete a custom image | `image delete` | Ensure no active workloads or collaborators depend on it |
 
-镜像刚保存或刚注册时，不要只看创建命令成功；必须等到 `READY` 后再用于调度。
+Always wait for a newly saved or registered image to reach `READY` before scheduling workloads with it.
 
-## 3. 可见性边界
+## 3. Visibility Levels
 
-可见性有三档，对应网页镜像选择器的三个自定义页签：`private`（个人可见）、`project`（项目可见）、`public`（公开可见）；官方镜像是第四类，不由用户设置。默认按风险选：敏感依赖、个人实验和含内部调试文件的镜像保持 private；团队要复用且确认无 secret 后再放宽。`notebook save-image --visibility` 在保存时表达同一个选择，之后仍可用 `image set-visibility` 改。
+Custom images have three visibility levels matching the web UI tabs (`official` is reserved for platform-provided images):
+- `private` — visible only to the creator. Keep experimental builds or images with internal debugging state private.
+- `project` — shared with members of the project.
+- `public` — visible platform-wide.
 
-`image list --source` 用的是同一组名字，它筛的是可见性而非镜像来源——只有 `official` 是真的按来源筛。想按名字解析一个镜像却解析不到时，先确认它是不是在没查过的那一档里。
+**Promoting an image to `public` is irreversible.** Once public, the platform removes creator ownership: you can no longer revert it to `private` or delete it (only platform administrators can remove public images). Keep images in `private` or `project` until you are certain they should be permanently public.
 
-`--source all` 会同时读取 official / public / project / private 四个互不依赖的目录，再按这个固定顺序合并和去重；某一档失败时其它结果照常返回，并附该档 warning。指定单一 `--source` 仍只发一个请求。
+`image list --source <level>` filters by these tabs (`official`, `public`, `project`, `private`). `--source all` queries all four catalogs concurrently and merges them in order; if one catalog fails, the remaining results are still returned with a warning.
 
-一个 Registry 里有几千个镜像，靠 `--limit` / `--all` 翻页找不到东西：用 `--keyword` 做名称子串匹配（大小写不敏感），对应网页镜像列表自带的那个搜索框。
+When a saved image becomes a shared project base image, record its name, target Project/Workspace, and included dependencies in `INSPIRE.md` (see [`assets.md`](assets.md)).
 
-**改成 public 是单向操作。** 平台不再把创建者当成公开镜像的属主：既不能改回 private，也不能删除，只有平台管理员能清理。所以确认要长期共享、名字也定下来了再放开；试验性镜像留在 private 或 project。
+## 4. External Registration (`image register`)
 
-保存出的镜像成为项目基底或被后续 Workload 长期复用时，把名称、适用 Project / Workspace、用途和覆盖的依赖回填到 `INSPIRE.md`（见 [`assets.md`](assets.md)）。
+Use `image register` for images built locally, in CI, or in an external registry (for running Notebooks, use `notebook save-image` instead).
 
-## 4. Register 边界
+`image register` allocates a `<name>:<version>` slot in the platform Registry and prints the `docker login`, `docker tag`, and `docker push` commands for the returned registry host.
+- **A reserved slot starts in `FAILED` state until you push the image.** This is normal platform behavior, not a registration error.
+- Only use `--wait` after your `docker push` has completed; waiting on an unpushed slot will time out.
+- The CLI does not support `.tar` archive uploads; use the web console if you need to upload a tarball.
 
-`image register` 适合外部镜像，不适合保存运行中的 Notebook——后者走 `notebook save-image`。
+If a registered image stays stuck after pushing, check registry authentication, tag matching, and whether the target Workspace maps to that Registry.
 
-它只有一条路径：平台按 `<name>:<version>` 留一个 Registry 槽位并回一个镜像地址，你自己 `docker push` 上去。命令会连同 `docker login` / `tag` / `push` 三行一起打印，登录主机名取自平台回的地址。**槽位不是镜像**——推上去之前这条记录一直是 `FAILED`，那是正常的中间态，不是注册失败。`--wait` 只有在 push 已经落地之后才有意义，一个没推过的槽位永远等不到 `READY`。
+## 5. Cleanup
 
-网页控制台另有一条「文件上传」路径（上传镜像 tar），CLI 不实现文件上传，需要它就去网页端。
+Before running `image delete`, verify that:
+- No running or pending Notebook, Job, HPC, Ray, or Serving workload uses the image.
+- No batch files or `INSPIRE.md` contracts reference it.
+- Collaborators no longer need it to reproduce prior runs.
 
-注册后一直无法 `READY` 时，优先怀疑 push 根本没执行、Registry 权限、镜像地址不完整、Tag 不存在或目标 Workspace 无法访问该 Registry。
-
-## 5. 清理原则
-
-只删除确认不再使用的自定义镜像。清理前至少确认：
-
-- 没有 Running 或 Pending 的 Notebook、Job、HPC、Ray 或 Serving 依赖它。
-- Batch 文件、Profile 或协作约定不再引用它。
-- 协作者不再用这个版本复现实验。
-
-被取消的保存会在目录里留下一条 `FAILED` 镜像记录，取消命令本身不清理它；确认不再需要后用 `image delete` 单独删掉。
+Canceling an in-progress snapshot with `notebook cancel-save-image` leaves a `FAILED` record in the image catalog; clean it up explicitly with `image delete`.

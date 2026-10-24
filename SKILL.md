@@ -1,85 +1,88 @@
 ---
 name: inspire
-description: "Use for Inspire/启智平台 (qz.sii.edu.cn) through the inspire CLI: INSPIRE.md asset upkeep, workspace/project/resource/path selection, Notebook, GPU Job, HPC, Ray, Serving, TensorBoard, Image, Model Registry, observation, cleanup, and Inspire CLI Browser API maintenance. Use CLI Help for syntax and load only the focused reference."
+description: "Use for the Inspire compute platform through the inspire CLI: INSPIRE.md asset upkeep, workspace/project/resource/path selection, Notebook, GPU Job, HPC, Ray, Serving, TensorBoard, Image, Model Registry, observation, cleanup, and Inspire CLI Browser API maintenance. Use CLI Help for syntax and load only the focused reference."
 ---
 
 # Inspire Skill
 
-`inspire` 是启智平台的本地 CLI。命令组、子命令、参数、默认值和示例以 `inspire --help`、`inspire <group> --help` 和 `inspire <group> <subcommand> --help` 为准；本文件只保留平台判断、项目上下文约定、最短执行闭环和 Reference 路由。
+`inspire` is the local CLI for the Inspire compute platform. Always treat `inspire --help`, `inspire <group> --help`, and `inspire <group> <subcommand> --help` as the source of truth for commands, flags, defaults, and examples. This document covers platform concepts, project conventions, the core execution loop, and reference routing.
 
-## 核心操作模型
+## Core Operating Model
 
-`inspire account use <name>` 设置持久默认账号；所有命令的 `--account <name>` 仅覆盖本次命令。账号使用本地 Alias。命令开始后固定账号，不受其他进程切换默认账号影响；不传参数只使用默认账号。切账号保留各账号的 Session、SSH Connection 和资源缓存，需要清理时使用相应的显式缓存管理命令。
+### Accounts
+`inspire account use <name>` sets the persistent default account. Passing `--account <name>` on any command overrides the account for that invocation only. Accounts are referenced by local alias. Once a command starts, its account is pinned and unaffected by concurrent changes to the default account. Switching accounts preserves each account's web session, SSH connections, and local caches.
 
-执行前先把任务拆成四个平面：
+### Four Execution Planes
 
-| 平面 | 绑定内容 |
+Break every task down into four planes before running commands:
+
+| Plane | What It Binds |
 | --- | --- |
-| 调度条件 | `workspace`、`project`、`group`、`quota`、GPU / CPU / 内存 / Shared Memory 和 `image`，决定任务在哪里、以什么规格运行。 |
-| 远端文件 | 代码、数据、权重、Checkpoint 和产物的共享盘绝对路径。可在 shell 里用环境变量缩写；CLI 不维护路径 Alias。数据广场的官方数据集由创建时的 `--dataset` 只读挂载。 |
-| 工作负载 | 交互调试用 Notebook；固定 GPU 后台任务用 Job；CPU Slurm 批处理用 HPC；弹性 Worker、常驻或流式任务用 Ray；模型 HTTP 服务用 Serving。 |
-| 观察收尾 | Events 看调度，Logs 看程序（Job / HPC / Ray / Serving 都有，Notebook 用 `exec` / `shell` 读），Metrics / Instances 看实际工作单元，Status 看平台状态和落点；读完还要进实例里看的时候 `shell` 在 Job / HPC / Ray / Serving 下都有，默认进哪个实例按 Workload 定；训练曲线本身用 TensorBoard（`inspire tensorboard`）读。最后核验业务健康和产物，再清理资源。 |
+| Scheduling | `workspace`, `project`, `group`, `quota`, GPU/CPU/Memory/Shared Memory, and `image` — where and at what spec the workload runs. |
+| Remote Files | Absolute shared-storage paths (`/inspire/...`) for code, data, weights, checkpoints, and outputs. Use shell environment variables for shorthand; the CLI does not store path aliases. Official datasets from the Dataset Hub are mounted read-only via `--dataset`. |
+| Workload Type | **Notebook** for interactive debugging and environment setup; **Job** for fixed-scale background GPU workloads; **HPC** for CPU Slurm batch jobs; **Ray** for elastic workers, long-running daemons, or streaming pipelines; **Serving** for online HTTP model deployments. |
+| Observation & Cleanup | **Events** for scheduling/controller state; **Logs** for program output (available on Job, HPC, Ray, and Serving; on Notebook use `exec` or `shell`); **Metrics** and **Instances** for per-unit load and placement; **Status** for platform state and assigned nodes; **`shell`** for interactive container inspection (available on Job, HPC, Ray, and Serving); **TensorBoard** (`inspire tensorboard`) for training curves. Verify outputs and clean up resources when done. |
 
-创建 Workload 时每次显式传入 `workspace`、`project`、`group`、`quota` 和 `image`；这些调度字段没有隐式默认值，CLI 也不保存 Workload Profile。选择资源时从同一条 Live Quota Row 复制完整 `group` 和 `quota`，并用 Live 镜像目录选当前需要的 `image`。GPU Job Shared Memory 不能超过所选 Quota 的实例内存；细节见 [`references/compute-workloads.md`](references/compute-workloads.md)。
+### Scheduling & Live State
+- Always pass `workspace`, `project`, `group`, `quota`, and `image` explicitly when creating workloads. There are no implicit defaults or saved workload profiles.
+- Copy both `group` and `quota` from the same live quota row, and select `image` from the live image catalog. For GPU Jobs, `--shm-size` cannot exceed the instance memory in the selected quota (see [`references/compute-workloads.md`](references/compute-workloads.md)).
+- Live queries are the source of truth for accounts, workspaces, projects, compute groups, quotas, images, and availability. The local cache only accelerates name and catalog resolution. Manage it with `inspire cache status|refresh|clear` (all accept `--resource <kind>`). `inspire cache refresh` requires an explicit scope (`--resource`, `--workspace`, or `--name`) and is rarely needed in normal operation.
+- The CLI addresses resources by name and alias. Disambiguate duplicate names with `--workspace` or `--pick`.
+- Discovery lists and batch outputs show up to 20 items by default; use `--limit/-n` or `--all` to adjust. Job logs apply line and character budgets with truncation notices. Pass root-level `inspire --json ...` when structured single-document JSON output is needed.
 
-Live 查询是账号、Workspace、Project、Compute Group、Quota、Image 和资源可用性的事实源；本地缓存只是加速层，可用 `inspire cache status|refresh|clear` 管理，三条命令都接受 `--resource <kind>` 只针对一类，不能当作资源事实；`refresh` 不接受裸形式，必须用 `--resource` / `--workspace` / `--name` 说明刷哪一块，而且正常情况下不需要跑它。CLI 对 Agent 的稳定资源身份只有 Name 和 Alias；同名对象用 Workspace、可读候选和 `--pick` 消歧。
+### Workspaces & Network Boundaries
+- `CPU资源空间` (CPU workspace) and `分布式训练空间` (distributed GPU training workspace) are the default public workspaces available to all users:
+  - Use `CPU资源空间` for CPU Notebooks, outbound internet downloads, dependency preparation, CPU HPC jobs, and CPU Ray jobs.
+  - Use `分布式训练空间` for GPU Notebooks, GPU Jobs, multi-node training, Serving, and GPU observation.
+- Other workspaces (project-dedicated workspaces, specialized hardware partitions, etc.) must be explicitly specified by the user. Do not select them automatically just because they appear in a listing.
+- `分布式训练空间` typically has no outbound internet access. Download external repositories, weights, and datasets from `CPU资源空间` onto shared storage or bake dependencies into an image before running GPU workloads (see [`references/internal-sources.md`](references/internal-sources.md)).
 
-通用文档只记录平台合同、当前 CLI 行为和长期有效的判断规则。某个账号可见的专属 Workspace / Registry 名称、当次目录数量、即时配额与价格、资源 ID、临时探针结果和待补验结论都不进入通用文档；这些事实随账号和时间变化，使用时从 Live 命令读取。受控验证只保留能够复现且直接约束实现的结论，不保留实验现场或过程统计。
+### Restricted H100/H200 Notebooks
+Notebooks on `H100` or `H200` GPUs run commands over `JupyterTerminal` rather than SSH. `JupyterTerminal` `exec` binds remote stdin to `/dev/null` and does not support local stdin forwarding: never pass `--stdin` / `--bash-stdin`, pipe local data, or redirect local files into `inspire notebook exec` on restricted notebooks (or before transport is confirmed). Stage scripts and input files on `/inspire/...` first, or use `inspire notebook shell` for interactive TTY sessions. SSH-backed notebooks support `exec --stdin` normally (see [`references/notebook.md`](references/notebook.md)).
 
-受限 H100/H200 Notebook 的 JupyterTerminal `exec` 不支持本地 stdin，远端命令的默认 stdin 是 `/dev/null`。Agent 不得对它使用 `--stdin` / `--bash-stdin`，也不得从本地用管道或 `< file` 向 `inspire notebook exec` 喂输入；尚未确认 Transport 时同样不要先试。CLI 会在 Transport 预检后、发送用户命令前拒绝这些组合。需要脚本或输入文件时，先把它放到 `/inspire/...`，再让远端命令用显式重定向或路径读取；需要人工交互时使用带 TTY 的 `inspire notebook shell`，不要把 `shell` 当作脚本输入通道。SSH Notebook 的 `exec --stdin` 不受此限制。
+## Persistent Asset Contract (`INSPIRE.md`)
 
-发现类列表和 Batch 结果默认最多展示 20 项，用命令自身的 `--limit/-n` 收窄或 `--all` 显式展开；Job 日志默认有行数和字符预算，截断时会给出已展示数量和继续获取完整结果的选项。需要结构化输出时使用根级 `inspire --json ...`，输出始终是单一 JSON 文档。
+The CLI does not use repo-local `./.inspire/` configs or bind a repository to a single project. Select the target project, workspace, paths, and image explicitly for each task.
 
-Workspace 判断：
+Maintain an optional `INSPIRE.md` in a repository only when stable remote paths, base images, models, dataset revisions, or long-lived infrastructure need to be shared across sessions and collaborators. Scope each entry by Project and Workspace; never store credentials, transient status, or raw logs in `INSPIRE.md` (see [`references/assets.md`](references/assets.md)).
 
-- `CPU资源空间` 和 `分布式训练空间` 是所有用户默认可用的公共 Workspace：前者承担 CPU Notebook、联网准备、依赖安装、HPC 数据处理和 CPU Ray；后者承担 GPU Notebook、GPU Job、多节点训练、Serving 和 GPU 观察。
-- 其余 Workspace（项目专属空间、国产卡分区等）必须由用户亲自指认；不要因为列表可见就自行启用。
-- `分布式训练空间` 通常没有公网：公网内容先在 `CPU资源空间` 准备，写入共享盘或固化成镜像，再供 GPU Workload 使用；判断细节见 [`references/internal-sources.md`](references/internal-sources.md)。
+## Standard Execution Loop
 
-## 持久资产上下文
+1. If `INSPIRE.md` exists, read the entries relevant to the current Project and Workspace.
+2. Load the single most relevant reference from the index below (load a second only when crossing domain boundaries).
+3. Check `--help` for the exact command syntax and flags.
+4. Query live state for account, workspace, project, compute group, quota, image, and resource availability.
+5. Prepare shared paths, code, and environment; run `--dry-run` or a short probe for complex setups.
+6. Submit the workload.
+7. Observe progress via `events`, `logs`, `metrics`, `instances`, `status`, or `tensorboard`.
+8. Verify application health and output integrity; record any new long-lived assets in `INSPIRE.md`.
+9. Stop running workloads before deleting them (`stop` then `delete`); delete finished temporary workloads unless downstream consumers still need them.
 
-CLI 不读写仓库级 `./.inspire/`，不把仓库绑定到某个 Project，也不假设一个仓库只在一个 Project 中运行。每次操作根据当前任务显式选择 Project / Workspace / 路径 / Image。
+## Reference Index
 
-`INSPIRE.md` 仍可作为人类可读的可选资产合同：只在仓库存在需要跨 Agent、成员和会话复用的稳定远端路径、镜像、模型、数据版本或永久基础设施时维护；每项资产自带明确 Project / Workspace 适用范围，可同时覆盖多个 Project。账号凭据、实时状态、日志和短期计划不进入该文件。见 [`references/assets.md`](references/assets.md)。
+Always use CLI `--help` for command syntax. Load only the reference needed for the current task:
 
-## 最短执行闭环
+### Platform Operations
 
-1. 如果存在 `INSPIRE.md`，先读取其中与当前 Project / Workspace 相关的稳定资产合同；不存在时直接从 Live 事实开始。
-2. 根据用户目标加载一份最匹配的 Reference；跨边界时再加载第二份。
-3. 用 CLI Help 确认当前版本的真实命令表面。
-4. 用 Live 查询确认账号、Workspace、Project、Compute Group、Quota、Image 和资源可用性。
-5. 准备共享路径、代码和环境；复杂条件先 `dry-run` 或运行短 Probe。
-6. 提交匹配的 Workload。
-7. 按当前 Workload 的 Help 依次观察可用的 Events、Logs、Metrics、Instances 和 Status。
-8. 核验业务健康与产物完整性；本次产生的持久资产写回 `INSPIRE.md`。
-9. 运行中的对象先 `stop`，再 `delete`；终态且不再需要的对象直接 `delete`，仍有当前或声明的未来消费者时保留。
-
-## 按需加载索引
-
-命令语法和参数始终回到 CLI Help。每次先加载最匹配的一份 Reference：
-
-### 平台操作
-
-| 用户问题或判断点 | 先加载 |
+| Task or Decision | Reference |
 | --- | --- |
-| 安装、更新、卸载、账号初始化、Windows 原生环境或本机代理设置 | [README 快速上手](https://github.com/realZillionX/InspireSkill#快速上手)；命令参数以 CLI Help 为准 |
-| `INSPIRE.md`、稳定资产身份与生命周期 | [`references/assets.md`](references/assets.md) |
-| Workspace、Compute Group、Quota、实时资源和优先级 | [`references/resources.md`](references/resources.md) |
-| 项目归属、负责人、预算与平台优先级（`inspire project`，全局对象、不按 Workspace 划分） | [`references/assets.md`](references/assets.md) |
-| 共享盘、存储池、挂载隔离和绝对路径 | [`references/paths.md`](references/paths.md) |
-| 数据广场检索、官方数据集挂载、版本与访问权限 | [`references/dataset.md`](references/dataset.md) |
-| 联网准备、SII 内部源、依赖安装、镜像固化 | [`references/internal-sources.md`](references/internal-sources.md) |
-| Notebook 创建、按账号连接、`exec` / `shell` / `scp`、IDE URL、文件流转 | [`references/notebook.md`](references/notebook.md) |
-| GPU Job、CPU HPC、Ray、Serving、TensorBoard，及提交后的观察、优先级与异常 | [`references/compute-workloads.md`](references/compute-workloads.md) |
-| CPU 准备、数据处理、GPU 训练、部署或交付的阶段化计划 | [`references/workflows.md`](references/workflows.md) |
-| Image 选择、保存、注册、可见性和清理 | [`references/image.md`](references/image.md) |
-| Serving Endpoint、`INF_API_KEY`、API Key 管理与请求亲和性 | [`references/compute-workloads.md`](references/compute-workloads.md) |
-| Model Registry、Model Version 与 Serving 的关系 | [`references/model.md`](references/model.md) |
+| Account initialization, updates, uninstall, or local proxy checks | `inspire init --help`, `inspire account --help`, `inspire update --help`, `inspire uninstall --help` |
+| `INSPIRE.md` conventions, project metadata (`inspire project`), and asset lifecycle | [`references/assets.md`](references/assets.md) |
+| Workspaces, compute groups, quotas, live availability, usage attribution, and priority rules | [`references/resources.md`](references/resources.md) |
+| Shared storage scopes, storage tiers, mount isolation, and remote paths | [`references/paths.md`](references/paths.md) |
+| Dataset Hub search, official dataset mounting (`--dataset`), versions, and access requests | [`references/dataset.md`](references/dataset.md) |
+| Outbound internet staging, internal package mirrors, dependency setup, and image baking | [`references/internal-sources.md`](references/internal-sources.md) |
+| Notebook creation, account-scoped connections, `exec` / `shell` / `scp`, HTTP proxy URLs, and image saving | [`references/notebook.md`](references/notebook.md) |
+| GPU Job, CPU HPC, Ray, Serving, API keys (`INF_API_KEY`), TensorBoard, batch submission, and observation | [`references/compute-workloads.md`](references/compute-workloads.md) |
+| Multi-stage project workflows across CPU staging, data processing, GPU training, and deployment | [`references/workflows.md`](references/workflows.md) |
+| Image selection, external registration, visibility levels, and cleanup | [`references/image.md`](references/image.md) |
+| Model Registry, model versions, deployment sizing (`deploy-config`), and Serving boundaries | [`references/model.md`](references/model.md) |
+| Python SDK (`InspireClient`, `InspireAsyncClient`, `Accounts`, typed models, remote exec, file transfer) | [`references/sdk.md`](references/sdk.md) |
 
-### CLI 开发
+### CLI Maintenance
 
-仅在维护 CLI Browser API 封装、核对前端请求合同，或用户明确要求接口细节时加载：
+Load only when maintaining the CLI's Browser API wrappers, auditing frontend request contracts, or inspecting raw protocol behavior:
 
-| 需要什么 | 加载 |
+| Topic | Reference |
 | --- | --- |
-| 请求契约、响应信封、认证与 Session、分页、Workspace scoping、错误码、探针方法、变更验收；当前 CLI 使用的 Action 请求体 / 响应 / 参数语义 / CLI 映射 / 限制；创建面字段合同；数据广场（`aip.sii.edu.cn`）的握手、信封与目录端点 | [`references/dev/browser-api.md`](references/dev/browser-api.md) |
+| `/api/v2` request/response envelopes, session & login guard, pagination, workspace scoping, probing methodology, per-route Action tables, creation payload contracts, and Dataset Hub (`plaza`) protocol | [`references/dev/browser-api.md`](references/dev/browser-api.md) |

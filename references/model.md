@@ -1,48 +1,42 @@
 # Model Registry
 
-浏览模型仓库、注册平台可见模型目录、查看模型版本，或判断 Model Registry 和 Serving 的边界时看本页。部署生命周期看 [`compute-workloads.md`](compute-workloads.md) 的 Serving 部分。命令语法和参数以 CLI Help 为准。
+Use this guide when browsing the Model Registry, registering model directories on shared storage, inspecting model versions, or sizing Serving deployments. For the Serving deployment lifecycle, see [`compute-workloads.md`](compute-workloads.md#6-serving-inspire-serving).
 
-## 1. 定位
+## 1. Model Registry vs. Serving
 
-`model` 是模型仓库入口；`serving` 是在线服务入口。二者不要混：
-
-| 模块 | 负责 | 不负责 |
+| Command Group | Responsibility | Does Not Handle |
 | --- | --- | --- |
-| Model Registry | 浏览 / 注册 / 删除模型条目，选择版本 | 创建部署、停止服务、上传本地文件 |
-| Serving | 创建、观察、停止和删除在线服务 | 上传模型、管理模型历史版本 |
+| `inspire model` | Browse, register, and delete model catalog entries; inspect versions and minimum deployment specs | Creating/stopping online services or uploading local files |
+| `inspire serving` | Create, observe, scale, roll back, stop, and delete online HTTP deployments | Uploading model weights or managing model catalog versions |
 
-通常流程是先把共享盘中的模型目录注册为 Model Registry 条目，再选择版本创建 Serving。
+Typical flow: stage model weights on project shared storage → register the directory with `inspire model register` → deploy a version with `inspire serving create`.
 
-## 2. 注册边界
+## 2. Registration Rules (`model register`)
 
-`model register` 只注册平台侧已经可访问的目录；它不上传本地文件，也不修改已有模型。模型存储位置必须是当前 Workspace 下的项目目录路径，路径不存在或不是该空间项目目录时后端会拒绝。
+`model register` registers an existing shared-storage directory already accessible to the platform; it does not upload local files or mutate existing models.
+- The storage path must reside under the target Project's directory in the selected Workspace (personal `global_user` paths are rejected).
+- Model names must start with a letter and contain only letters, digits, underscores, hyphens, or dots.
+- Use `--type` for the platform's hierarchical model category and `--tag` for task type, framework, license, or custom labels.
+- Appending new versions to an existing model entry, editing metadata, or publishing to the public Model Plaza must be done in the web console unless exposed in CLI `--help`.
 
-当前注册规则：
+## 3. Common Operations
 
-- 模型名支持字母、数字、下划线、短横线和点，且只能以字母开头。
-- 模型类型是级联分类；自定义标签适合放任务类型、训练框架、License 和业务标记。
-- 改元数据、追加版本和发布到模型广场仍以平台页面为准，除非 CLI Help 已出现对应入口。
+| Goal | Command | What to Check |
+| --- | --- | --- |
+| List models in a Workspace | `model list` | Filter by name, project, tags, and version status |
+| Check if a model is ready to deploy | `model status` / `model versions` | Storage path, version state, vLLM compatibility, and active consumers |
+| Find minimum hardware spec for a version | `model deploy-config` | Minimum node count, GPUs, CPUs, and memory required to load the weights |
+| Register a shared-storage directory | `model register` | Target Workspace, Project, and shared-storage path |
+| Delete a model entry | `model delete` | Active/stopped Serving consumers across all versions |
 
-## 3. 操作判断
+`model deploy-config` returns a **hard lower bound**, not a generous recommendation: choosing a `serving quota` smaller than `deploy-config` will typically OOM before the service even starts. It also queries live vLLM compatibility (the static compatibility field stored on version records is always `no` and is ignored by the CLI).
 
-| 目标 | 入口判断 |
-| --- | --- |
-| 看 Workspace 有哪些模型 | `list` 后按名称、项目、标签和版本状态筛候选 |
-| 看某个模型能否部署 | `status` / `versions`，重点看存储路径、版本状态、vLLM 兼容标记 |
-| 看某个版本要多大规格 | `deploy-config`，平台给出装得下权重的最小节点形状 |
-| 看这个版本还有没有人在用 | `status` 直接列出仍占着它的推理服务、排队中的部署和其它在跑的版本 |
-| 注册新条目 | 用 `model register` 注册目标项目共享盘中的现有目录 |
-| 删除整个条目 | `model delete`，先按下面的占用规则确认 |
-| 创建服务 | 转到 `serving create`，按资源、镜像、启动命令和端口判断 |
+## 4. Deletion Rules (`model delete`)
 
-`deploy-config` 返回的规格是下限，不是建议值：低于它的 `serving quota` 档位就是「部署还没启动就注定 OOM」的那种失败。它同时给出 vLLM 兼容判断，决定 vLLM 启动命令是不是一个可选项。vLLM 兼容标记一律现查平台，不读版本记录里那个存量字段——那个字段是死的，恒为 no。
+`model delete` permanently removes the **entire model catalog entry and all of its versions** (individual versions cannot be deleted separately). It does not delete the underlying files on shared storage, so the directory can be re-registered later if needed, though version history and model identity are lost.
 
-## 4. 删除边界
-
-`model delete` 删的是**整个模型条目连同它的全部版本**，不能只删某一个版本，也不能撤销。共享盘上被注册的那个目录不动，所以同一个路径随时可以用 `model register` 重新登记回来——真正丢掉的是条目身份和版本历史。
-
-删除前 CLI 会逐版本核对推理服务占用，有占用就点名拒绝。判据是这个服务还有没有可能再起来：`RUNNING` / `STOPPED` / `SLEEPING` 都算占用（停掉的服务可以被 `serving start` 拉回来），已经 `FAILED` 的不算。占用探测本身失败时**拒绝删除**而不是当作没占用。`--force` 跳过这层检查，它不回答占用问题，只是不再问。
-
-换版本或清理旧模型之前，先用 `status` 看一眼谁还在用；这一步以前只能回网页翻。
-
-日常看 Agent 可读输出；只有脚本消费字段或需要精确结构时才用根级 `inspire --json ...`。
+Before deleting, the CLI checks every version for dependent Serving deployments:
+- Any deployment in `RUNNING`, `STOPPED`, or `SLEEPING` state counts as an active consumer (since stopped deployments can be restarted with `serving start`), and `model delete` will refuse with the offending deployment names.
+- Deployments in `FAILED` state do not block deletion.
+- If the dependency check itself fails, deletion is aborted rather than assuming zero consumers.
+- Pass `--force` to bypass the consumer check when you intentionally want to delete the catalog entry anyway.

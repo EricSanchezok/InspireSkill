@@ -1,1069 +1,545 @@
-# Browser API 参考
+# Browser API Maintainer Reference
 
-> **文档类型**：CLI 维护者参考。日常启智操作不要加载本页；Agent 使用公开命令时只依赖 Name-only CLI 合同和对应 `--help`。
+> **Audience:** CLI and SDK maintainers. Do not load this file during normal workload operations — regular CLI usage relies solely on the name-based CLI surface and `--help`.
 >
-> **覆盖两个平台**：启智控制台 `qz.sii.edu.cn` 的接口面（第 1–10 章）和数据广场 `aip.sii.edu.cn`（第 11 章）。两者不同 host、不同 API 风格、不同 Session，只共用同一套 CAS SSO，但都由 CLI 的同一层 Web Session 驱动，所以记在一起。
->
-> **平台只有 `/api/v2` 一个接口面**：v1 随平台弃用已完全迁移完毕，本页其余部分不再提它。
+> **Scope:** Covers both the main compute console (`/api/v2` Action gateway on `{base_url}`, Sections 1–10) and the Dataset Hub (`plaza`, Section 11). Both share the same CAS single sign-on (SSO) session layer.
 
-## 1. 事实源与不变量
+## 1. Sources of Truth & Invariants
 
-Browser API 是启智控制台自己用的接口面：同一台 `qz.sii.edu.cn`、同一个 CAS Session，控制台 SPA 全程走 `/api/v2` 的 Action 网关。官方 CLI `qz` 是这套接口的另一个客户端，不是它的前置依赖。
-
-| 顺位 | 事实源 | 它定义什么 |
+| Priority | Source | What It Defines |
 | --- | --- | --- |
-| 1 | [`browser_api/`](../../cli/inspire/platform/web/browser_api/) | 唯一构造平台请求的地方：实际发什么、读哪个键、怎么归一化 |
-| 2 | [`session/`](../../cli/inspire/platform/web/session/)、[`plaza/`](../../cli/inspire/platform/web/plaza/) | 账号隔离、登录、Cookie、代理、传输层重试；数据广场客户端 |
-| 3 | `cli/tests/test_browser_api_*.py` | 锁定 Wrapper 合同与输出边界 |
-| 4 | 控制台前端实际发的请求 | 判定「平台有没有这个能力」时唯一可靠的来源 |
-| 5 | `GET {base_url}/discovery` | 候选 Action 名与参数形状。**是线索，不是合同**（第 6 章） |
-| 6 | 当前 Click Help | 公开 CLI 合同 |
+| 1 | [`browser_api/`](../../cli/inspire/platform/web/browser_api/) | Canonical request construction, response key extraction, and normalization |
+| 2 | [`session/`](../../cli/inspire/platform/web/session/), [`plaza/`](../../cli/inspire/platform/web/plaza/) | Per-account isolation, login, cookies, proxies, transport retries, and Dataset Hub client |
+| 3 | `cli/tests/test_browser_api_*.py` | Unit tests locking wrapper contracts and output boundaries |
+| 4 | Live console SPA network requests | Authoritative proof of whether a platform capability exists and what payload it sends |
+| 5 | `GET {base_url}/discovery` | Candidate Action names and request schemas (**a hint, not a contract** — see Section 6) |
+| 6 | Click `--help` | Public CLI contract |
 
-| 不变量 | 由谁保证 |
-| --- | --- |
-| 平台 JSON 请求只在 `browser_api/` 内构造 | `job_shell.py` 的实例 PTY 是 WebSocket；`session/auth.py` 的登录自举发生在 Wrapper 可用之前，两者不属于 JSON Action 请求 |
-| 响应解包只有一个入口 | `session/envelope.py` 的 `_v2_result()`，`browser_api/core.py` 再导出 |
-| 本页只收有当前消费者、且可复现的事实 | 未闭合的调查与迁移过程记录不进入 |
+**Core invariants:**
+- All `/api/v2` JSON Action requests are constructed inside `browser_api/` (instance PTY WebSockets in `job_shell.py` and login bootstrap in `session/auth.py` are the only non-Action console flows).
+- All v2 JSON responses are unpacked through `_v2_result()` in `session/envelope.py` (re-exported by `browser_api/core.py`).
+- Only verified, reproducible contracts with active or explicitly evaluated consumers belong in this document.
 
-## 2. 请求契约
+## 2. Request & Response Contract
 
-```
-POST {base_url}/api/v2/{路由}?Action={Action}
+```http
+POST {base_url}/api/v2/{route}?Action={Action}
 Cookie: inspire-session=…
 Content-Type: application/json
-Referer: {base_url}/{对应控制台页面}
+Referer: {base_url}/{console_page_path}
 
-{ …JSON 请求体… }
+{ …JSON body… }
 ```
 
-| 契约项 | 规则 |
+| Aspect | Rule |
 | --- | --- |
-| 方法与形状 | **只有 POST、只有 JSON body**，动作名在 query 里。没有 REST 风格路径参数，没有 GET/DELETE 变体（例外见第 10 章） |
-| 认证 | 只需要 `inspire-session` cookie；`x-inspire-client-source` 头在只读面上非必需 |
-| `Referer` | **必须与页面域匹配**，由各 Wrapper 按对应控制台页面构造，调用方不要自行拼接 |
-| 字段名大小写 | 大小写与下划线**不敏感**：`ImageId` / `image_id` / `Image_Id` 落到同一字段。真正会出事的是**换了一个名字**——`image.UpdateImage` 要裸 `id`，`image_id` 是另一个字段，不会被归一化过去 |
-| 路径前缀 | **不可配置**，写死在 `browser_api/` 内 |
-| Base URL 与代理 | 来自当前有效配置；Playwright 登录与后续请求复用同一账号的网络设置 |
-| 账号隔离 | 所有平台请求使用**目标 Account Alias** 的 SSO Session；跨账号命令不能退回当前活动账号的 Session |
+| Method & Shape | Always `POST` with a JSON body and `?Action={Action}` in the query string (for non-Action WebSocket/proxy routes, see Section 10). |
+| Authentication | Requires the `inspire-session` cookie (`x-inspire-client-source` is not required on read paths). |
+| `Referer` | Must match the origin and corresponding console page path; constructed per wrapper. |
+| Field Casing | Protobuf JSON unmarshaling is case- and underscore-insensitive (`ImageId` / `image_id` / `Image_Id` map to the same field), **except** when the underlying field name itself differs (e.g., `image.UpdateImage` requires `id`, whereas `image_id` is silently ignored). |
+| Account Isolation | Every request uses the SSO session and proxy configuration of the selected Account Alias; cross-account commands never fall back to the active default account. |
 
-### 响应信封
+### Response Envelope
 
-成功与失败共用一个 AWS 风格信封，**HTTP 状态码在两种情况下都是 200**：
+Both successes and business errors return **HTTP 200** with an AWS-style JSON envelope:
 
 ```jsonc
-{"ResponseMetadata": {…}, "Result": {…}}                                  // 成功
-{"ResponseMetadata": {"Error": {"Code": "…", "Message": "…"}}}            // 业务错误
+{"ResponseMetadata": {…}, "Result": {…}}                                  // Success
+{"ResponseMetadata": {"Error": {"Code": "…", "Message": "…"}}}            // Business error
 ```
 
-| 规则 | 内容 |
-| --- | --- |
-| 解包入口 | `_v2_result()`：先看 `ResponseMetadata.Error`，再取 `Result`，取不到给 `{}` |
-| 禁止 | **不能用状态码判断成败，也不能自己写信封检查**——手写一个 `code != 0` 会把每一个真错误变成 `API error: None` |
-| 列表键 | **逐 Action 不同，没有跨 Action 约定**，解包器必须按 Action 显式声明，见第 8 章「响应」列 |
-| 判定顺序 | **429 → 401/302 → 非 JSON → `ResponseMetadata.Error` → `Result`**。429 必须在 Content-Type 嗅探之前判掉：网关限流返回 HTML 错误页，先嗅探会误判成「路由不通」 |
+- **Unpacking order:** Check `429` → `401/302` → non-JSON content-type → `ResponseMetadata.Error` → `Result` (defaulting missing `Result` to `{}`). Always check `429` before sniffing `Content-Type` because gateway rate-limiting returns an HTML error page.
+- **List keys vary per Action:** There is no universal list key (`jobs`, `items`, `list`, `logs`, `events`, `scale_history_items`, `logic_compute_groups`, `node_dimensions`, etc.); declare the expected key explicitly in each wrapper.
 
-| Code | 含义 | 处置 |
+| Error `Code` | Meaning | Handling |
 | --- | --- | --- |
-| `InvalidAction` | 该 Action 在这条路由上不存在 | 路由是活的，换 Action 名；`404 page not found` 才是路由不存在 |
-| `InvalidParameter` | 请求体不符合合同（含 `proto: unknown field "X"`、必填缺失、`page or page_size too large`） | 我们自己写错了，改请求体 |
-| `AccessForbidden` | 真的没权限，**或者** scoping 没写全 | 先按第 5 章把 scoping 补全再下结论 |
-| `ResourceNotFound` | 对象不存在 | `notebook` / `hpc` / `serving` 的找不到就是它；`train.DeleteJob` 反而给 `AccessForbidden` |
-| `Conflict` | 状态不允许该操作（运行中删除、已运行再启动） | 先 `stop` 或先轮询状态 |
-| `InternalError` / `Throttling` / `ServiceUnavailable` / `SlowDown` / `RequestTimeout` / `TooManyRequests` | 平台暂时不回答 | 抛 `TransientAPIError`，由传输层退避重试 |
+| `InvalidAction` | Action does not exist on this route | Route itself is alive (a missing route returns HTTP `404 page not found`) |
+| `InvalidParameter` | Schema violation (`proto: unknown field "X"`, missing required field, `page or page_size too large`) | Fix request payload |
+| `AccessForbidden` |Genuine permission denial **or** missing workspace scoping | Verify workspace scoping placement (Section 5) before concluding lack of permission |
+| `ResourceNotFound` | Target object does not exist | Standard on `notebook` / `hpc` / `serving`; note that `train.DeleteJob` returns `AccessForbidden` instead |
+| `Conflict` | Invalid state transition (e.g., deleting a running workload or starting an already running one) | `stop` and poll until stopped before deleting |
+| `InternalError` / `Throttling` / `ServiceUnavailable` / `SlowDown` / `RequestTimeout` / `TooManyRequests` | Transient server or gateway error | Raised as `TransientAPIError` and retried by the transport layer |
 
-**`InternalError` 有歧义**：既可能是平台真的崩了，也可能是字段被接受后处理器出错。用它判断字段存在性之前必须做对照实验（第 7 章）。它还会吞掉确定性的用户错误——`hpc.GetJobLog` 的超宽时间窗、`hpc.CreateJobConsole` 缺 `priority` 键都走这一条，先白烧三次重试再抛出一条看起来像平台故障的错。这类已知项一律在客户端挡在前面。
+> [!WARNING]
+> `InternalError` is ambiguous: it can indicate a genuine server failure, a handler crash after accepting a valid field, or a deterministic validation failure (e.g., `hpc.GetJobLog` time window > 30 days, or `hpc.CreateJobConsole` missing `priority`). Validate known client-side constraints before sending requests so deterministic errors do not burn transient retries.
 
-### 传输层
+### Transport Layer & Empty Results
 
-[`session/__init__.py`](../../cli/inspire/platform/web/session/__init__.py) 的 `request_json()` 是 requests 与 Playwright 两条路径唯一的收口。
+`request_json()` in [`session/__init__.py`](../../cli/inspire/platform/web/session/__init__.py) is the single entrypoint for both `requests` and Playwright channels:
+- **Retries:** HTTP `408/425/429/500/502/503/504` and transient envelope codes raise `TransientAPIError` (`ValueError` subclass) and retry up to 3 times (honoring `Retry-After` up to 8s, otherwise exponential backoff with jitter). Keep rate-limit retries in the transport layer, never in individual wrappers.
+- **`page_size` clamping:** `_clamped_page_size()` caps `page_size` at `5000` (preserving `-1` for "fetch all"). Exception: `train.ListJobs` rejects `page_size >= 1000` with `InvalidParameter: page or page_size too large`, so `jobs.list_jobs` clamps at `999`.
+- **Never conflate request failure with an empty result:** Only a successful response with zero items means "none exist". Wrappers must never swallow `TransientAPIError` or `SessionExpiredError` into `[]`, `None`, or `0`. Fan-out wrappers (such as per-group quota fetches) must track partial completion explicitly (`QuotaCatalog.complete`).
 
-| 机制 | 规则 |
-| --- | --- |
-| 瞬时错误 | HTTP 408 / 425 / 429 / 500 / 502 / 503 / 504 与信封里的 transient 码统一抛 `TransientAPIError`（`ValueError` 子类） |
-| 重试 | 最多 3 次，优先采纳 `Retry-After`（上限 8 秒），否则指数退避加抖动；耗尽后原样抛出 |
-| 限流吸收位置 | **必须留在传输层**。Workspace 级问题都是「每个计算组一次请求」的扇出，正是限流器会反应的形状；Wrapper 不要各自重试 |
-| `page_size` 上限 | 超过 5000 由 `_clamped_page_size()` 无条件截断。网关**逐 service 执行**这条（`hpc` 强制，`ray` 给 10000 也照收），不能靠某个 service 没报错推断没有上限。`-1` 是「取全部」，原样放过 |
-| `train.ListJobs` 的更低上限 | 这是 Action 级例外：`page_size=999` 实测返回 999 行，`1000` 直接答 `InvalidParameter: page or page_size too large`。`jobs.list_jobs` 先按 999 截断，缓存完整刷新也复用这条 Wrapper |
-| 请求体 | 不会被就地修改，截断走浅拷贝 |
-| 连接 | 复用连接池；Cookie / Header / 代理每次调用重设，刷新过 Session 后不会拿旧凭据作答 |
+### Session Lifecycle & Login Guard (`session/login_guard.py`)
 
-### 「平台没有回答」不等于「平台回答了没有」
+`get_web_session()` returns the cached disk session without pre-validating it (1-hour local TTL).
+- **Renewal flow:** On `401` or `3xx` (with `allow_redirects=False`), `_request_json_once()` first attempts a passwordless SSO renewal using existing CAS/Keycloak cookies (verifying that the renewed user ID matches). Only if SSO cookies cannot renew the session does it enter a single credential login guarded by the login circuit breaker, then retries the original request once.
+- **Single-submission login guard:** Because repeated failed logins trigger CAS account lockouts and CAPTCHA challenges Vary by `User-Agent`, at most **one** credential submission is permitted per session expiration:
+  - Both the `requests` CAS flow and the Playwright Chromium flow inspect the login form before submitting credentials. If `requests` encounters a CAPTCHA form, it falls back to Chromium without submitting; if Chromium also requires a CAPTCHA, it aborts before typing credentials and raises `AuthenticationError`.
+  - Once credentials are POSTed, **any** subsequent failure raises `AuthenticationError` and never falls back to a second submission path.
+  - Consecutive credential failures record a per-account circuit-breaker file (`web_session.login-block.json`) with escalating cooldowns (`60s → 5m → 15m → 30m`, reset after 1 hour, a successful login, a newer disk session, or a password change).
 
-**只有平台成功返回的空结果，才能读作「这个对象没有」。** Wrapper 不得把 `TransientAPIError`、`SessionExpiredError` 或任何失败折叠成 `[]` / `None` / `0` / 「不存在」。事件、配额目录、资源可用量、节点计数尤其危险——用户会据此做调度决策。对应地：请求失败与「平台返回空」必须在返回值上可区分，且要有测试覆盖失败那一侧；扇出型 Wrapper 还要能表达「部分成功」（`QuotaCatalog.complete`）。
+## 3. Route Names
 
-### Session 生命周期
+Gateway URLs use the route slug in `/api/v2/{route}`, which does **not** always match the Service `Name` in `/discovery`:
 
-`inspire-session` 的实际有效期远短于一次完整的批量调用，而 `get_web_session()` **直接返回磁盘缓存、不做校验**（本地 TTL 1 小时，过期后仍交出缓存，让平台自己判定）。
-
-| 场景 | 做法 |
-| --- | --- |
-| CLI 内部 | 已兜住：`_request_json_once()` 禁止重定向，收到 401 / 3xx 后先尝试用仍有效的 CAS / Keycloak Cookie **无密码续签** Qizhi Session；续签不会复用刚被拒绝的 `inspire-session`，且新旧平台用户必须一致。没有可安全复用的 SSO 状态时才进入一次受熔断保护的凭据登录，最后重试原请求一次 |
-| 重建预算 | 每次 `request_json()` 只有一次，且**跨 429 重试共享**——上层 Wrapper 不得再包一层认证重试，那是在已经用掉的预算上再加一次登录 |
-| 外部探针脚本 | 必须自己重试：401 / 302 时回到 `request_json()` / 正常 Wrapper 的续期路径；直接调用 `get_web_session(force_refresh=True)` 会跳过无密码 SSO 续签并进入凭据登录，只留给明确需要重新登录的账号管理流程 |
-| 直接读 `web_session.json` 拿 cookie | **错的**：绕过续期路径，拿到的往往已过期，表现为整批调用统一 401，很容易误判成「网关不接受我们的 cookie」 |
-| 探针的重定向 | 必须 `allow_redirects=False`。认证失败时网关 302 到 Keycloak；跟随重定向会把这个信号变成一张 HTML 登录页，和「路由不存在」无法区分 |
-
-### 提交凭据只有一个入口
-
-CAS 会在连续登录失败后锁账号，也可能要求验证码；验证码未填写时仍可能返回通用的 `账号或密码错误。`。验证码要求按客户端变化：同一网络、同一登录入口，仅更换 User-Agent 就能收到不同的表单，requests 被要求验证码不代表 Chromium 也被要求。因此「一次会话过期最多换来一次凭据提交」是硬约束：每条登录路径都在提交前独立检查实际密码表单，要求验证码的表单不提交。浏览器和 CLI 不共享 Session，浏览器登录成功不能保证 CLI 自动恢复。
-
-`login_with_playwright()` 是全 CLI 唯一把密码放上网线的地方，闸门就设在那里（`session/login_guard.py`），不设在调用方——调用方各自限制自己的重试次数，仍然是在别人已经花掉的预算上再加一次。
-
-| 项 | 事实 | 读错的后果 |
+| Discovery Service `Name` | Gateway Route | Notes |
 | --- | --- | --- |
-| `AuthenticationError` | 「凭据已经出去了，且没通过」。凭据一旦 POST 出去，**任何**后续失败（4xx、5xx、连接断开、响应丢失）都是它 | 当成普通 `ValueError` 就会回落 Playwright，把一次提交变成两次 |
-| 回落边界 | requests/CAS 路径**只在提交之前**可以回落到 Playwright：取登录页、解析表单、拿 RSA 公钥失败都还没提交 | 把提交之后的失败也当作「换条路再试」，就是第二次提交 |
-| 验证码 | requests 密码表单同时有验证码字段和同源验证码图片时不提交，转由 Chromium 检查自己的表单；Chromium 同样要求验证码则在填写凭据前停止，否则允许唯一一次密码提交。未提交不打开熔断 | 假定所有客户端收到相同表单而拒绝正常浏览器登录，或留空照 submit 后把通用拒绝误报成密码错误 |
-| 熔断标记 | `web_session.login-block.json`，按 Account 存，记 `failures` / `blocked_until` / 凭据指纹（PBKDF2，不含明文），不含平台响应 | 以为它只在本进程有效——它的意义正是让并发进程读到同一个事实 |
-| 冷却档位 | 60s → 5min → 15min → 30min（封顶），按**连续**失败次数升级；1 小时没人再试就清零重来 | 以为等一分钟总能再试一次——连续失败会越等越久，这正是防锁的部分 |
-| 解除方式 | 冷却到期、**改凭据**（指纹变了立刻放行）、或有更新的 Session 落盘 | 以为只能干等；用户改完密码应当立刻能登 |
-| 无密码续签 | 熔断只禁止重复提交凭据，不禁止拿已有 CAS / Keycloak Cookie 换新 Qizhi Session；续签成功会落盘更新代际，旧标记随即变成 stale | 把熔断误当成所有认证流量都不能走，逼用户复制出一个新 Account Alias |
-| 登录成功 | 清掉标记，不计次 | 以为成功也受限——成功的提交不会触发 CAS 锁定，不该限流 |
-| 本地缓存写失败 | 登录仍然算成功，Session 照常返回，只是这次没落盘 | 当成登录失败就会把平台刚认过的凭据丢掉，再登一次 |
+| `inference-serving` | **`inference_serving`** | Hyphenated form returns 404 |
+| `model-hub` | **`model-hub`** | Underscore form returns 404 |
+| `train` / `hpc` / `ray` / `notebook` / `workspace` / `user` / `project` / `image` / `cluster` | Same as `Name` | — |
+| *(Not in discovery)* | **`resource-price`**, **`file`**, **`dataset`** | Plural variants (`files`, `datasets`, etc.) return 404 |
 
-## 3. 路由名
+## 4. Pagination & `total` Quirks
 
-网关路径用的是**路由名**，不是 discovery 里的 Service `Name`，两个带连字符的 Service 行为相反。
-
-| discovery Service `Name` | 网关路由 | 另一种写法 |
+| Aspect | Platform Behavior | Wrapper Handling |
 | --- | --- | --- |
-| `inference-serving` | **`inference_serving`** | 连字符形式 404 |
-| `model-hub` | **`model-hub`** | 下划线形式 404 |
-| `train` / `hpc` / `ray` / `notebook` / `workspace` / `user` / `project` / `image` / `cluster` | 与 `Name` 相同 | — |
-| （不在 discovery 里） | **`file`** | `files` 404 |
-| （不在 discovery 里） | **`dataset`** | `datasets`、`dataset-hub`、`dataset_hub`、`data_plaza`、`data`、`plaza` 全部 404 |
+| Page number key | `PageNumber`, `page_num`, and `page` are interchangeable on most Actions | **`train.ListTensorboards` only accepts PascalCase `PageNumber`** (`page` / `page_num` silently return `[]`) |
+| `page_size: -1` | Supported by `workspace.ListLogicComputeGroups`, `image.ListImages`, `project.ListProjects`; returns only 10 rows on `workspace.List*Dimension`; rejected by `model-hub.ListModels` | Only use `-1` on verified Actions; paginate explicitly by `total` elsewhere |
+| Omitting `page_size` | `ListLogicComputeGroups` and `hpc.ListSlurmdPodEvent` return `[]` with a non-zero `total` | Always send an explicit `page_size` |
+| `total` type | Either `int` (`notebook.ListNotebooks`) or numeric `str` (`hpc.ListJobs` returns `"202"`) | Always coerce via `_coerce_total()`, never `isinstance(total, int)` |
+| Unpaginated Actions | `notebook.ListRunIndex` rejects `PageNumber` | Do not send pagination keys |
+| Unknown field unmarshaling | Most Actions reject unknown keys with `proto: unknown field`, but `train.CreateTensorboard` and `notebook.SaveMirror` silently drop unknown keys | Test with a known-invalid key first before relying on `unknown field` probes |
 
-**不能从 `Name` 机械推导路由**，新增 Service 必须实测两种写法。`audit`、`billing`、`storage` 三条路由也活着（返回 `InvalidAction` 或 `user is not system admin`，都不是 404），但没有与当前 CLI 相关的 Action。
+## 5. Workspace Scoping
 
-## 4. 分页与 total
+The same `workspace_id` is placed in four different locations depending on the Action:
 
-| 现象 | 事实 | 读错的后果 |
+| Placement | Actions |
+| --- | --- |
+| Top-level `workspace_id` | `ListJobs` (`train`/`hpc`/`ray`), `notebook.ListNotebooks`, `inference_serving.ListServings`, `model-hub.ListModels`, `workspace.GetWorkspaceQuota`, `workspace.GetWorkspaceComputeResource`, `workspace.GetLogicComputeGroupResource`, `workspace.Get*NodeSpecs`, `dataset.ValidateDataset` |
+| Nested `filter.workspace_id` | `workspace.ListNodeDimension` / `ListTaskDimension` / `ListUserDimension`, `workspace.ListLogicComputeGroups`, `project.ListProjects`, `file.*` |
+| Top-level `workspace_id` + nested `filter_by` | `notebook.ListNotebooks`, `ray.ListJobs`, `inference_serving.ListServings`, `model-hub.ListModels` (filters go inside `filter_by`, while `workspace_id` stays at top level) |
+| PascalCase `WorkspaceId` | `user.GetPermissions`, `user.GetRoutes`, `notebook.GetScheduleConfig` |
+
+### `cluster.*` vs. `workspace.*`
+
+- The 8 dimension/resource Actions shared between `cluster.*` and `workspace.*` (`ListNodeDimension`, `ListTaskDimension`, `ListProjectDimension`, `ListUserDimension`, `ListLogicComputeGroups`, `GetOverviewResourceMetric`, etc.) return `AccessForbidden` for regular users under `cluster.*` and must be called under `workspace.*` with `filter.workspace_id`.
+- **Exception:** `cluster.ListNodeEvents` has no `workspace.*` counterpart and is readable by regular users (`inspire resources node-events`).
+
+## 6. Surface Discovery & `scripts/scan_v2_surface.py`
+
+| Source | What It Proves | Limitations |
 | --- | --- | --- |
-| 分页参数拼法 | `PageNumber` / `page_num` / `page` 三者等价且都真实生效 | — |
-| 唯一例外 | `train.ListTensorboards` **只认 PascalCase `PageNumber`** | `page` / `page_num` 被静默忽略并返回空列表 |
-| `page_size: -1`（取全部） | 逐 Action 不同：`workspace.ListLogicComputeGroups`、`image.ListImages`、`project.ListProjects` 认；`workspace.ListNodeDimension` 与维度族只回 10 条；`model-hub.ListModels` 直接拒 `page or page_size invalid` | 按「-1 就是全部」类推会静默丢数据 |
-| 省略 `page_size` | `ListLogicComputeGroups`、`hpc.ListSlurmdPodEvent` 返回**空列表配非零 `total`** | 读起来像「这个工作空间没有计算组」 |
-| `total` 类型 | 逐 Action 或 int 或 string（`notebook.ListNotebooks` 给 int，`hpc.ListJobs` 给 `"202"`） | 用 `isinstance(total, int)` 判断再回退 `len(items)`，等于把「这一页」当「全部」，翻页循环第一页就停。统一走 `_coerce_total()` |
-| 无分页 Action | `notebook.ListRunIndex` 传 `PageNumber` 直接报错 | — |
-| 未知字段是否报错 | 一般报 `unknown field`，但 `train.CreateTensorboard` 与 `notebook.SaveMirror` 的 unmarshaller **静默丢弃** | 「逐字段试，看哪个不被拒」在它们身上全通过。对写侧 Action 用这个方法前，先发一个确定不存在的键确认它真会拒 |
+| `GET {base_url}/discovery` | Static list of public Services/Actions and request field schemas (`Version` is a content etag) | Response list keys (`Items`/`TotalCount`) are inaccurate; omits `resource-price`, `file`, `dataset`, and `*Console` write Actions; does not reflect RBAC permissions |
+| Console SPA bundles (`scripts/scan_v2_surface.py`) | Lower bound of Actions and REST paths actively called by the web UI | Must recursively follow lazy-loaded JS chunks from the entrypoint and normalize template literals |
+| `user.GetMyPermissions` | Returns `{Services: {svc: {Read, Write, Actions: {Action: bool}}}}` for RBAC-gated services | Does not cover `train`, `notebook`, `workspace`, `project`, `ray`, or `hpc` |
 
-## 5. Workspace scoping
+Never conclude a capability is missing based solely on `/discovery` — always check `*Console` variants and the SPA bundle first.
 
-**同一个 `workspace_id`，四种放法，逐 Action 固定，不能类推**：
+## 7. Probing Methodology
 
-| 放法 | 用它的 Action |
-| --- | --- |
-| 顶层 `workspace_id` | `train`/`hpc`/`ray` 的 `ListJobs`、`notebook.ListNotebooks`、`inference_serving.ListServings`、`model-hub.ListModels`、`workspace.GetWorkspaceQuota`、`workspace.GetWorkspaceComputeResource`、`workspace.GetLogicComputeGroupResource`、`workspace.Get*NodeSpecs`、`dataset.ValidateDataset` |
-| 嵌套 `filter.workspace_id` | `workspace.ListNodeDimension` / `ListTaskDimension` / `ListUserDimension`、`workspace.ListLogicComputeGroups`、`project.ListProjects`、`file.*` |
-| 嵌套 `filter_by`（与 keyword / status / user 同层） | `notebook.ListNotebooks`、`ray.ListJobs`、`inference_serving.ListServings`、`model-hub.ListModels` 的**过滤条件**（workspace 仍在顶层） |
-| PascalCase `WorkspaceId` | `user.GetPermissions`、`user.GetRoutes`、`notebook.GetScheduleConfig` |
+When verifying undocumented Actions or fields without mutating state:
+1. **Route existence:** Send any Action name. HTTP `404` means the route does not exist; `InvalidAction` proves the route is live.
+2. **Action existence:** Send `{}`. `InvalidAction: unknown action: X` means the Action does not exist; any validation error proves the Action exists.
+3. **Field existence:** Send `{"candidate_field": "x"}`. `InvalidParameter: proto: unknown field` means the field is not in the schema.
+   - **Caveat 1 (`InternalError`):** Always compare against a control request with a known-invalid field (`{"nonexistent_xyz": 1}`) to verify the handler performs strict protobuf unmarshaling.
+   - **Caveat 2 (Fake resource IDs mask unknown fields):** Gateway auth middleware checks resource IDs (`notebook_id`, `ray_job_id`, etc.) *before* strict protobuf decoding. Sending a fake ID returns `ResourceNotFound` even when accompanied by unknown fields. Probe either without a resource ID or with a real resource ID owned by the test account.
+4. **Write semantics & round-trip:** Only trust a write field if the resulting resource state actually changes and `Get*` (or container inspection) reflects the written value.
 
-```jsonc
-// 错：ListNodeDimension 上被当成集群级请求 -> AccessForbidden
-{"workspace_id": "ws-…", "logic_compute_group_id": "lcg-…", "PageNumber": 1}
+## 8. Action Reference by Route
 
-// 对：工作空间级
-{"filter": {"workspace_id": "ws-…", "logic_compute_group_id": "lcg-…"}, "PageNumber": 1}
-```
+Every entry below is called via `POST {base_url}/api/v2/{route}?Action={Action}` and unpacked from `Result`. `†` indicates an Action absent from `/discovery`; `‡` indicates an entire route absent from `/discovery`.
 
-**`AccessForbidden` 有两种含义**：真的没权限，或者忘了 scoping。区分方法是照 discovery 声明的参数结构把 `workspace_id` 放到它声明的位置再试一次。把 scoping 问题当成权限问题，会导致本来可用的 Action 被错误地标成不可用。
-
-### `cluster.*` 与 `workspace.*`
-
-| 项 | 结论 |
-| --- | --- |
-| 同名的 8 个 Action | `ListNodeDimension`、`ListTaskDimension`、`ListProjectDimension`、`ListUserDimension`、`ListLogicComputeGroups`、`GetOverviewResourceMetric` 等在 `cluster.*` 下对非集群管理员一律 `AccessForbidden`，在 `workspace.*` 下可用。**普通成员一律用 `workspace.*`** |
-| 适用范围 | **只适用于两边同名的那 8 个**，不能推广成「集群级端点一律换 `workspace.*`」——Metrics 是反例（第 8.14 节） |
-| 唯一该用 `cluster.*` 的 | `cluster.ListNodeEvents`：没有 `workspace.*` 对应物，且对普通成员可读，是平台上唯一按节点而不是按工作负载组织的事件源 |
-| `workspace.*` 内部分层 | `GetScheduleConfig`、`ListUserQuotas`、`ListWorkspaceParentProjects`、`GetUserTaskQuota`、`GetWorkspaceTaskQuota`、`GetDefaultUserTaskQuota` 需要工作空间管理员，均未封装。**`workspace.GetScheduleConfig` 不是各 Workload 路由下 `Get*ScheduleConfig` 的汇总入口**，只是重名 |
-| `GetDefaultUserQuota` | 普通成员能读，但描述的是**新成员默认值**、在可达 Workspace 上一律不限，无信息量 |
-
-## 6. 接口面清单：discovery 与前端产物
-
-| 来源 | 覆盖 | 能证明什么 |
-| --- | --- | --- |
-| `GET {base_url}/discovery` | 当前平台公开的 Service / Action 清单，`Version` 是内容 etag | 候选 Action 名与参数形状。**不带认证头，匿名与带 Cookie 内容相同**——静态文档，不按角色过滤；数量和版本从 Live 响应读取，不固化在参考里 |
-| 控制台前端产物 | 当前 SPA 实际引用的 Action 与 REST 路径 | **下界**：能证明某个 Action 存在，不能证明不存在 |
-| `user.GetMyPermissions` | 有 RBAC 网关的服务权限（不覆盖 `train` / `notebook` / `workspace` / `project` / `ray` / `hpc`） | 空请求体，回 `{Services: {服务: {Read, Write, Actions: {Action: bool}}}}`。覆盖范围内权威，且可能列出前端未引用的 Action。判「我能不能调」先问它，比探针便宜 |
-| 探针 | 逐个 | 唯一能否定的手段（第 7 章） |
-
-### discovery 逐字段的可信度
-
-| 字段 | 可信度 |
-| --- | --- |
-| Action 的**参数**结构 | 基本可信，是查 scoping 位置和字段拼写的第一手材料 |
-| 响应的**顶层列表键与 total** | **不可信**。声明 `Items` / `TotalCount`，实际是 `jobs` / `list` / `logs` / `events` / `scale_history_items` / `logic_compute_groups` / `node_dimensions` 加小写 `total` |
-| 响应**元素内部的属性名** | 基本可信。错的只有外面那层信封，里面的形状可以照着写，再用一次真实响应确认 |
-| Service `Name` | 不等于网关路由名（第 3 章） |
-| Service 全集 / Action 全集 | **不完整**：缺 `file`、`dataset`，缺写操作的 Console 变体 |
-| Action 是否可调 | **完全不代表**，权限只能实测 |
-| `Version` | 可信，是内容 etag，可直接用来判断平台是否改过接口面。**历史上双向变动过**，不能假设新版本是旧版本的超集 |
-
-### 不在 discovery 里、但活着且正在用
-
-| 类型 | 清单 |
-| --- | --- |
-| 整条路由（`‡`） | `resource-price`、`file`、`dataset`——其中 `resource-price` 挡在每一个 `create` 前面 |
-| 单个 Action（`†`） | `train.CreateJobConsole`、`hpc.CreateJobConsole`、`inference_serving.CreateServingConsole`、`notebook.ListNotebookCreators`、`notebook.CheckNotebook`、`user.GetPermissions`、`user.GetRoutes`、`project.ListProjects`、`project.GetProjectDetail`、`project.GetProjectOwners`、`image.CreateImage`、`image.UpdateImage`、`model-hub.CreateModel`、`model-hub.DeleteModel`、`train.CreateTensorboard` / `StartTensorboard` / `StopTensorboard` / `DeleteTensorboard` |
-| 前端产物里有、discovery 没有的路由 | `audit`、`billing`、`file`、`image_plaza`、`inference_serving`、`job`、`model_plaza`、`operate-log`、`resource-price`、`sandbox`、`sandbox-api-key`、`sandbox-pool`、`sandbox-template`、`serving`、`storage`。**`inference_serving` 是假阳性**——discovery 拼成 `inference-serving`，对账脚本按字符串比不会替你看穿 |
-| 探活结果 | 探针结果只证明目标角色在当次请求中的可达性，不写成所有账号的权限表。`storage` / `operate-log` 对普通成员返回 `user is not system admin`；`billing` 的错误也不能反推路由不存在。目录成功返回空只表示该角色没有可见行，不表示 Action 无效 |
-
-**判定「无对应物」的固定错误模式**：只测 discovery 里那个同名 Action 就下结论。`inference_serving` 只测 `CreateServing` 会漏掉 `CreateServingConsole`；只测 `ListWorkspaceNodes` 会漏掉 `ListNodeDimension`；只看 `user` 服务会漏掉 `workspace.*` 下那 10 个配额 Action。配额目录整条 `resource-price` 路由不在 discovery 里，据此判过一次「没有对应物」，是错的。**discovery 只能用来找候选，不能用来否定。**
-
-### 扫描器：`scripts/scan_v2_surface.py`
-
-抓 `{base_url}/` 的入口 chunk，按 `"./xxx.js"` 递归拉全部产物，提取写死的 `/api/v2/{route}?Action={Action}` 与 REST 路径，再和 discovery 对账；`--probe` 按第 7 章的判据逐个探活。产物数量和体积属于当次构建信息，不进入合同。
-
-| 已知的取样陷阱 | 处理 |
-| --- | --- |
-| Action 名正则写 `[A-Za-z]+` | 会把 `GetProjectListV2` 截成 `GetProjectListV`，看起来像一个不存在的 Action。必须写 `[A-Za-z0-9]+` |
-| REST 路径锚在收尾双引号上 | 模板字符串拼的地址（`` `${base}/api/v2/notebook/lab/${id}/` ``）会被漏掉。扫描器把插值段当一个路径段匹配并归一成 `{}` |
-| 只取 `/assets/index.*.js` 入口 | 创建表单在惰性加载的 chunk 里，必须从入口递归抓 |
-
-**每一种取样方法都有盲区，先说清盲区再下「不存在」的结论。**
-
-## 7. 探针方法
-
-下结论前按顺序走，每一步都不需要发出真正的写请求。
-
-| 步骤 | 打法 | 判据 |
-| --- | --- | --- |
-| ① 路由存在性 | 任意 Action 打过去 | `404 page not found` 才是路由不存在；`InvalidAction` 说明路由活着 |
-| ② Action 存在性 | 空 body | `InvalidAction: unknown action: X` = 不存在；其它错误码 = 存在但参数不对。空 body 在校验阶段被拒，创建不出东西 |
-| ③ 字段存在性 | 只带一个候选字段 | `InvalidParameter: proto: unknown field "X"` = 不在合同里；**其它任何报错都表示在合同里**（通常是必填校验） |
-| ④ 猜名字 | 未文档化 Action 的名字是资源路径去掉前缀后的 PascalCase | `/project/{id}` → `GetProjectDetail`、`/file/dir/list` → `GetDirList`、`/project/owners` → `GetProjectOwners`。猜不中换动词（`Get` / `List` / `Create` / `Update` / `Delete`）和单复数，一轮十几个名字覆盖 |
-| ⑤ 看控制台调什么 | 带 Session 的浏览器录网络请求，或扫全量 bundle | 平台前端**全程走 v2**，它调什么就说明什么存在。`resource-price.GetLogicComputeGroupResourceSpecPrices`、`user.ListSSH`、`user.GetMyPermissions` 都是这么找到的 |
-| ⑥ 写语义 | **只能受控验证** | 不能从只读流量推导，也不能只看响应信封——`ray.StartJob` 会返回干净的成功信封。**成功以状态真的变了为准** |
-| ⑦ 写进去要读得回来 | 同一请求里放几个已知会 round-trip 的字段做对照组，创建后 `Get*` 读回来比对 | 一个字段被 `Create*` 接受不代表它生效。必要时进容器看实际效果 |
-
-**③ 有两个已知的失效条件：**
-
-`InternalError: internal server error` 必须先做对照实验——`hpc.CreateJobConsole` 对空 body 和对合法字段都回这一句，只有塞进一个确定不存在的字段才会回 `unknown field`。没有对照就无法区分「字段被接受、处理器崩了」和「请求根本没进解析」。
-
-**一个解析不到对象的资源 id 会静默废掉这把尺子。** 网关的鉴权中间件在严格 proto 解析**之前**先读一遍资源键：读不到对象就直接返回，body 里其它字段根本没进解析。
-
-| body | 回答 | 说明 |
-| --- | --- | --- |
-| `{"nonexistent_field_xyz": "x"}` | `unknown field "nonexistent_field_xyz"` | 不带 id，尺子正常 |
-| `{"notebook_id": <真实>, "nonexistent_field_xyz": "x"}` | `unknown field "nonexistent_field_xyz"` | **真实 id，尺子照常工作** |
-| `{"notebook_id": "nb-does-not-exist", "nonexistent_field_xyz": "x"}` | `ResourceNotFound: notebook not found` | **假 id，未知字段被掩盖** |
-| `{"ray_job_id": "x", "nonexistent_field_xyz": "x"}` | `ResourceNotFound: ray job not found` | 同上，另一条路由 |
-
-第三、四行会**主动骗人**：`{"ray_job_id": "x"}` 打给 `ray.GetJobLog` 答 `ResourceNotFound`，看起来 `ray_job_id` 在合同里——其实不在，换成真实 id 或整个去掉就会看到 `unknown field`。所以：**要么不带资源 id，要么带一个真实拥有的对象的 id。**
-
-## 8. Action 参考表
-
-每条都是 `POST {base_url}/api/v2/{路由}?Action={Action}`，响应取信封里的 `Result`。「请求体」列写的是 **CLI 实际发出的键**；「响应」列写的是**实测的线上键**。`†` = 该 Action 不在 discovery 里，`‡` = 整条路由不在 discovery 里。
-
-| 路由 | 域 | Action 数 | 主要 CLI 命令组 |
+| Route | Domain | Action Count | Primary CLI Groups |
 | --- | --- | --- | --- |
-| [`train`](#81-train--分布式训练与-tensorboard) | GPU 训练任务、TensorBoard | 16 | `job`、`tensorboard` |
-| [`hpc`](#82-hpc--cpu-slurm-批处理) | CPU Slurm 批处理 | 11 | `hpc` |
-| [`ray`](#83-ray--弹性计算) | 弹性计算 | 12 | `ray` |
-| [`notebook`](#84-notebook--交互式建模) | 交互式建模 | 18 | `notebook`、`image` |
-| [`inference_serving`](#85-inference_serving--模型部署) | 模型部署 | 19 | `serving` |
-| [`workspace`](#86-workspace--工作空间资源) | 计算组、节点、配额、用量 | 9 | `resources`、`<workload> quota`、每个 `create` |
-| [`user`](#87-user--账号) | 账号身份、权限与 API Key | 7 | `account permissions`、所有按当前用户过滤的列表 |
-| [`project`](#88-project--项目) | 项目 | 4 | `project`、每个 `create` |
-| [`image`](#89-image--镜像) | 镜像 | 5 | `image` |
-| [`model-hub`](#810-model-hub--模型仓库) | 模型仓库 | 14 | `model`、`serving create` |
-| [`resource-price`](#811-resource-price--配额目录-) ‡ | 按计算组解析好的配额目录 | 1 | `<workload> quota`、每个 `create` |
-| [`file`](#812-file--文件页-) ‡ | 存储池与目录发现 | 2 | 当前 CLI 无消费者 |
-| [`dataset`](#813-dataset--官方数据集挂载-) ‡ | 官方数据集挂载 | 1 | `dataset validate`、`--dataset` |
-
-| 状态 | 清单 |
-| --- | --- |
-| 有 Wrapper、暂无 CLI 消费者 | `notebook.ListNotebookLifecycles`、`notebook.ListNotebookCreators`、`ray.ListJobCreators`、`inference_serving.GetInferenceServingTerms`、`model-hub.ListModelVersionOptions`、`model-hub.ListModelCreators`、`model-hub.GetModelPublishPrefill`、`model-hub.GetModelPublishStatus`、`project.GetProjectForPage`（表中 CLI 列写「—」） |
-| 查过、刻意不封装 | 见各节末尾的「不接」表 |
+| [`train`](#81-train--distributed-training--tensorboard) | GPU Jobs & TensorBoard | 16 | `job`, `tensorboard` |
+| [`hpc`](#82-hpc--cpu-slurm-batch) | CPU Slurm Batch | 11 | `hpc` |
+| [`ray`](#83-ray--elastic-compute) | Ray Clusters | 12 | `ray` |
+| [`notebook`](#84-notebook--interactive-modeling) | Notebooks & Image Snapshots | 18 | `notebook`, `image` |
+| [`inference_serving`](#85-inference_serving--model-serving) | Online Model Serving | 19 | `serving` |
+| [`workspace`](#86-workspace--cluster--workspace-resources) | Compute Groups, Nodes, Quotas, Usage | 9 (+1 `cluster`) | `resources`, `<workload> quota`, `create` |
+| [`user`](#87-user--account--api-keys) | Identity, Permissions & API Keys | 7 | `account`, owner-filtered lists |
+| [`project`](#88-project--projects) | Projects & Budgets | 4 | `project`, `create` |
+| [`image`](#89-image--image-catalog) | Image Registry | 5 | `image` |
+| [`model-hub`](#810-model-hub--model-registry) | Model Registry | 14 | `model`, `serving create` |
+| [`resource-price`](#811-resource-price--quota-catalog-) ‡ | Per-Group Quota & Price Catalog | 1 | `<workload> quota`, `create` |
+| [`file`](#812-file--storage-discovery-) ‡ | Storage Pools & Directories | 2 | *(No active CLI consumer)* |
+| [`dataset`](#813-dataset--dataset-mount-validation-) ‡ | Official Dataset Validation | 1 | `dataset validate`, `--dataset` |
 
 ---
 
-### 8.1 `train` — 分布式训练与 TensorBoard
+### 8.1 `train` — Distributed Training & TensorBoard
 
-Referer：`/jobs/distributedTraining`，详情页 `/jobs/distributedTrainingDetail/{job_id}`。
+Referer: `/jobs/distributedTraining` (detail: `/jobs/distributedTrainingDetail/{job_id}`).
 
-| Action | 请求体 | 响应（`Result` 内） | CLI |
+| Action | Request Keys | Response (`Result`) | CLI Consumer |
 | --- | --- | --- | --- |
-| `CreateJobConsole` † | 见[创建面字段合同](#9-创建面的字段合同) | `{job_id, sub_code, sub_msg}` | `job create`、`job batch` |
-| `GetTrainScheduleConfig` | `{workspace_id}` | `train_enable_specified_nodes` | `job create --specified-node`、Job Batch 的 `specified_nodes` |
-| `GetJob` | `{job_id}` | `name` / `status` / `command` / `framework_config[]` / `dataset_info[]` / `node_infos[]` / `specified_nodes[]` / `exclude_nodes[]` / `project_id` / `workspace_id` / `logic_compute_group_name` / `created_at` / `finished_at` | `job status` / `command` / `logs` / `metrics` / `wait` |
-| `ListJobs` | `{workspace_id, page_num, page_size, created_by, status?, keyword?}`；或 `{workspace_id, job_ids[]}` 按 id 批量取，见 [8.15](#815-批量读--listjobs--listjobevents-的复数形态) | `{jobs[], total}`（`total` 是 int） | `job list`、`job status`、Name Resolver、`cache refresh` |
+| `CreateJobConsole` † | See [Section 9](#9-creation-payload-contracts) | `{job_id, sub_code, sub_msg}` | `job create`, `job batch` |
+| `GetTrainScheduleConfig` | `{workspace_id}` | `train_enable_specified_nodes` | `job create --specified-node`, `job batch` |
+| `GetJob` | `{job_id}` | `name`, `status`, `command`, `framework_config[]`, `dataset_info[]`, `node_infos[]`, `specified_nodes[]`, `exclude_nodes[]`, `project_id`, `workspace_id`, `logic_compute_group_name`, `created_at`, `finished_at` | `job status` / `command` / `logs` / `metrics` / `wait` |
+| `ListJobs` | `{workspace_id, page_num, page_size, created_by, status?, keyword?}` or batch `{workspace_id, job_ids[]}` ([Section 8.15](#815-batch-reads--listjobs--listjobevents)) | `{jobs[], total}` (`total` is `int`) | `job list`, `job status`, Name Resolver, `cache refresh` |
 | `ListJobInstances` | `{job_id, page_num, page_size}` | `{items[], total}` | `job instances` / `shell` / `logs` / `events` |
-| `ListJobEvents` | `{PageNumber\|page_num, page_size, filter:{object_type, object_ids[]}}`，`object_ids` 可多个，见 [8.15](#815-批量读--listjobs--listjobevents-的复数形态) | `{events[], total}` | `job events` |
+| `ListJobEvents` | `{PageNumber\|page_num, page_size, filter:{object_type, object_ids[]}}` ([Section 8.15](#815-batch-reads--listjobs--listjobevents)) | `{events[], total}` | `job events` |
 | `GetJobLog` | `{page_size, filter:{podNames[], start_timestamp_ms, end_timestamp_ms}}` | `{logs[], total}` | `job logs` |
 | `StopJob` | `{job_id}` | `{code, message}` | `job stop` |
 | `DeleteJob` | `{job_id}` | — | `job delete` |
-| `GetTaskMetric` | 见 [8.14](#814-metrics--gettaskmetric) | `{time_seris_metric_groups[]}` | `job metrics` |
-| `ListTensorboards` | `{workspace_id, created_by, PageNumber, page_size, status?, keyword?}` | `{items[], total}` | `tensorboard list`、Name Resolver |
-| `GetTensorboard` | `{tb_id}` | `name` / `status` / `tb_summary_path` / `url` / `job_id` / `job_name` / `auto_stop_time_ms` / `running_time_ms` / `project_name` / `logic_compute_group_name` | `tensorboard status` / `tags` / `scalars`、启停轮询 |
-| `CreateTensorboard` † | `{name, workspace_id, project_id, logic_compute_group_id, tb_summary_path, auto_stop_time_ms, job_id?}` | **恒为 `{}`** | `tensorboard create` |
+| `GetTaskMetric` | See [Section 8.14](#814-metrics--gettaskmetric) | `{time_seris_metric_groups[]}` | `job metrics` |
+| `ListTensorboards` | `{workspace_id, created_by, PageNumber, page_size, status?, keyword?}` | `{items[], total}` | `tensorboard list`, Name Resolver |
+| `GetTensorboard` | `{tb_id}` | `name`, `status`, `tb_summary_path`, `url`, `job_id`, `job_name`, `auto_stop_time_ms`, `running_time_ms`, `project_name`, `logic_compute_group_name` | `tensorboard status` / `tags` / `scalars`, wait polling |
+| `CreateTensorboard` † | `{name, workspace_id, project_id, logic_compute_group_id, tb_summary_path, auto_stop_time_ms, job_id?}` | Always `{}` | `tensorboard create` |
 | `StartTensorboard` † | `{tb_id}` | — | `tensorboard start` |
 | `StopTensorboard` † | `{tb_id}` | — | `tensorboard stop` |
 | `DeleteTensorboard` † | `{tb_id}` | — | `tensorboard delete` |
 
-**Job 要点**
+**Job notes:**
+- `ListJobEvents` serves both controller-level (`filter.object_type: "job"`) and pod-level (`filter.object_type: "instance"`, `object_ids` chunked at 200 pod names) events. Do not use `ListJobInstanceEvents` (its `total` is hardcoded to `"0"`).
+- `GetJobLog` requires string epoch-ms timestamps and rejects windows wider than 30 days.
+- `DeleteJob` requires the job to be stopped first (`Conflict` if running) and returns `AccessForbidden` (not `ResourceNotFound`) when the job ID does not exist.
+- `node_infos[]` holds assigned runtime nodes (cleared once stopped), whereas `specified_nodes[]` and `exclude_nodes[]` echo creation constraints. Per-rank node mapping comes from `ListJobInstances`.
+- `job list --workspace all` fans out across visible Workspaces in 8-way concurrent round-robin pages.
 
-| 项 | 事实 | 读错的后果 |
-| --- | --- | --- |
-| `ListJobEvents` 的两级 | 一个 Action 管两种事件，靠 `filter.object_type` 区分：`"job"` 给控制器级（`SetPodTemplateSchedulerName`、`Unschedulable`），`"instance"` 给 pod 级（`FailedScheduling` / `Scheduled` / `Pulling` / `Started`，更丰富）。`object_ids` 在后者是 pod 名列表，**按 200 个一批**分块 | 只读一级会漏掉真正说明调度失败的那一半 |
-| `ListJobInstanceEvents` | 同名易混的另一个 Action（`job_id` + `instance_name`），无论返回多少条 `total` 恒为 `"0"` | 需要分页的调用方不要用，`browser_api` 未封装 |
-| `GetJobLog` 时间戳 | 两个字段是**字符串**型 epoch 毫秒；后端拒绝任何宽于一个月的窗口；不接受 sorter | 传 int 被拒 |
-| `DeleteJob` | 要求先停止，运行中答 `Conflict`。**找不到资源时答 `AccessForbidden`**，不是 `ResourceNotFound`（与 `hpc.DeleteJob` 相反） | 按 `ResourceNotFound` 判「已删除」会漏判 |
-| 规格来源 | `JobInfo` 从 `framework_config[0]` 读 `gpu_count` / `cpu` / `mem_gi` / `shm_gi` / `instance_count`；GPU 型号在 `instance_spec_price_info.gpu_info.gpu_type_display` | — |
-| 节点归属三个字段 | `node_infos[]` 是**实际落点**（`{node_name}`，被调度后才有值，停止即清空）；`specified_nodes[]` / `exclude_nodes[]` 是**创建时的请求侧**（裸字符串数组）。`node_count` 是请求的节点数，与 `framework_config[0].instance_count` 同值 | `node_count` **不是** `node_infos` 的长度，排队中的任务两者不等。多节点任务把 rank 和节点对上只能靠 `ListJobInstances` 行的 `node` |
-| 跨 Workspace 列表 | `ListJobs` 本身只收一个 `workspace_id`，所以 `job list --workspace all` 必须扇出；CLI 按页以最多 8 个 Workspace 并发 round-robin，逐 Workspace 保留 `total` / page 状态，再合并排序和应用全局输出 limit | 串行扫描的延迟会逐 Workspace 相加；一次把所有页全并发又会冲击限流器，所以并发单位是“当前每个 Workspace 的下一页” |
-
-**TensorBoard 要点**
-
-| 项 | 事实 | 后果 |
-| --- | --- | --- |
-| 它是这条路由上的第二个对象 | discovery 只有读侧 Action，写侧靠探针发现。没有 `CreateTensorboardConsole` 变体，也没有 `Update` / `Restart` / `Check` / `GetTensorboardLog` / `ListTensorboardEvents` / `ListTensorboardInstances` / `GetTensorboardAccessUrl` / `GetTensorboardScheduleConfig`，这些候选都返回 `InvalidAction` | — |
-| `CreateTensorboard` 的字段名与报错名不一致 | 缺字段时报 `tensorboard_auto_stop_time_ms is required`，线上字段却是 **`auto_stop_time_ms`**，而且是**字符串**（传 int 报 `invalid value for string field autoStopTimeMs`）。上限 72 小时 | 照报错原样发字段名会被当未知字段丢掉，再报同一句 required，死循环 |
-| 它的 unmarshaller 忽略未知字段 | 不能靠 `unknown field` 反推契约，只能照 `GetTensorboard` 的响应字段拼 | — |
-| 它会建出没法用的 board | `name` 可省（建出来没名字，Name-only CLI 再也指不到）；`tb_summary_path` 可省（board 什么都读不到）。`workspace_id` 缺报 `ResourceNotFound: record not found`，`project_id` 缺报 `InternalError`，`logic_compute_group_id` 缺报 `ResourceNotFound: 已选择的计算类型组不存在`。真正可选的只有 `job_id` | Wrapper 把 `name` 和 `tb_summary_path` 也挡成必填 |
-| 不返回 id | `Result` 恒为 `{}`，新建的 board 只能回头用 `ListTensorboards` 按名字找 | — |
-| 规格与优先级不可选 | 平台固定 1 CPU / 2 GiB；`priority_name` 被静默忽略，`task_priority` 是 int32，新建一律落 `NORMAL` / `4` | — |
-| `GetTensorboard` 的未知 id | 答 `InvalidParameter: 用户不存在。`——一条谈用户的消息，实际含义是这个 board 不归你或不存在 | **不要读成账号问题** |
-| 删除顺序 | `DeleteTensorboard` 要求先停止（运行中答 `Conflict`）；`StopTensorboard` 对已停止的 board 幂等成功。状态取值 `tb_status_creating` / `_running` / `_stopped`，CLI 去掉前缀 | — |
-| `ListTensorboards` 两处不可猜 | 分页只认 PascalCase `PageNumber`；**不带 `created_by` 时 `total` 可以统计整个 Workspace，而 `items` 只含当前用户可读的行** | 两个数可能不相等。`status` 只收单个裸值，传数组报错；`keyword` 按名字子串真实生效；**`job_id` 被受理但滤不出东西**，按任务收窄只能在客户端做 |
-| 行里的 `url` 是一个真能打的 TensorBoard 应用 | 同一个 `inspire-session` cookie 直接认，`data/runs`、`data/plugin/scalars/tags`、`data/plugin/scalars/scalars?run=&tag=` 都返回 JSON（scalars 是 `[[wall_time, step, value], …]`）。地址可能是绝对 URL 或站内路径，Wrapper 对后者补 base | **这是「Agent 能不能自己看训练曲线」的全部答案**，所以 `url` 不投影给用户，改由 `tensorboard tags` / `scalars` 代读 |
-| 计算组的 `tensorboard` 作业类型 | `support_job_type_list` 里的取值之一，逐组不同——`分布式训练空间` 里就有训练组没声明它 | 建 board 前要按这个过滤计算组 |
-
-**查过、刻意不接**
-
-| Action | 理由 |
-| --- | --- |
-| `ListTensorboardUsers` | `{workspace_id}` 返回控制台「创建人」下拉框，对只看自己资源的 CLI 没有消费者 |
-| `ListPreCheckItems` / `GetPreCheckResult` | 不是「提交前校验规格」，是**每个训练任务创建时可选开启**的节点健康检查（创建面收 `enable_troubleshoot` 加 `pre_check_items`；没开的任务答 `train job does not enable troubleshoot precheck`）。是否可用由 Workspace 的 Live `train_enable_troubleshoot` 能力位和控制台表单共同决定，CLI 当前没有消费者 |
-
-`notebook.GetScheduleConfig` 里还有 `train_enable_slow_detect`、`train_enable_specified_nodes`、`train_enable_vccl` 三个同族能力位，各 Workspace 的值以 Live 响应为准。节点绑定已经接入 `job create --specified-node` 和 Job Batch 的 `specified_nodes`；创建前用 `train.GetTrainScheduleConfig` 读取同名能力位，关闭时不发创建请求。其余能力接入前仍要同时核对开关和控制台是否真正渲染控件。
+**TensorBoard notes:**
+- `CreateTensorboard` requires `auto_stop_time_ms` as a **string** (max 72h; missing field error misleadingly says `tensorboard_auto_stop_time_ms is required`). Its unmarshaller ignores unknown fields and returns `{}` on success, so the CLI resolves the newly created board by name via `ListTensorboards`.
+- `GetTensorboard` on an unknown ID returns `InvalidParameter: 用户不存在。` (treat as not found, not an account error).
+- `ListTensorboards` requires PascalCase `PageNumber`; `job_id` filter is ignored by the server and filtered client-side.
+- `GetTensorboard.url` points to a live TensorBoard web app authenticated by `inspire-session`, exposing `data/runs`, `data/plugin/scalars/tags`, and `data/plugin/scalars/scalars?run=&tag=` (used by `tensorboard tags` and `scalars`).
 
 ---
 
-### 8.2 `hpc` — CPU Slurm 批处理
+### 8.2 `hpc` — CPU Slurm Batch
 
-Referer：`/jobs/highPerformanceComputing`，详情页 `/jobs/hpcDetail/{job_id}`。
+Referer: `/jobs/highPerformanceComputing` (detail: `/jobs/hpcDetail/{job_id}`).
 
-| Action | 请求体 | 响应（`Result` 内） | CLI |
+| Action | Request Keys | Response (`Result`) | CLI Consumer |
 | --- | --- | --- | --- |
-| `CreateJobConsole` † | 见[创建面字段合同](#9-创建面的字段合同) | `{job_id, sub_code, sub_msg}` | `hpc create`、`hpc batch` |
-| `GetJob` | `{job_id}` | `{job_name, status, sbatch_script{}, slurm_cluster_spec{}, nodes[], steps, description, ttl_after_job_finish_seconds, dataset_info[], project_id, workspace_id, …}` | `hpc status`、`hpc metrics` |
-| `ListJobs` | `{workspace_id, page_num, page_size, created_by, status?}`；或 `{workspace_id, job_ids[]}` 按 id 批量取，见 [8.15](#815-批量读--listjobs--listjobevents-的复数形态) | `{jobs[]\|items[], total}`（`total` 是**字符串**） | `hpc list`、`hpc status`、Name Resolver |
-| `ListJobEvents` | `{pageNum: -1, pageSize: 200, filter:{object_ids:[job_id], object_type:"HPC_JOB"}, sorter:[{field:"last_timestamp", sort:"ascend"}]}`，`object_ids` 可多个，见 [8.15](#815-批量读--listjobs--listjobevents-的复数形态) | `{events[]\|items[]\|list[]}` | `hpc events` |
+| `CreateJobConsole` † | See [Section 9](#9-creation-payload-contracts) | `{job_id, sub_code, sub_msg}` | `hpc create`, `hpc batch` |
+| `GetJob` | `{job_id}` | `{job_name, status, sbatch_script{}, slurm_cluster_spec{}, nodes[], steps, description, ttl_after_job_finish_seconds, dataset_info[], project_id, workspace_id, …}` | `hpc status`, `hpc metrics` |
+| `ListJobs` | `{workspace_id, page_num, page_size, created_by, status?}` or batch `{workspace_id, job_ids[]}` | `{jobs[]\|items[], total}` (`total` is `str`) | `hpc list`, `hpc status`, Name Resolver |
+| `ListJobEvents` | `{pageNum: -1, pageSize: 200, filter:{object_ids:[job_id], object_type:"HPC_JOB"}, sorter:[{field:"last_timestamp", sort:"ascend"}]}` | `{events[]\|items[]\|list[]}` | `hpc events` |
 | `ListJobInstances` | `{jobId, page_num, page_size}` | `{items[]\|list[], total}` | `hpc instances` |
-| `ListSlurmdPodEvent` | `{instance_id, page_size, PageNumber}` | `{events[], total}`（字符串） | `hpc events --instance` |
-| `GetJobLog` | `{page_size, filter:{podNames[], start_timestamp_ms, end_timestamp_ms}}` | `{logs[], total}`（**int**） | `hpc logs` |
-| `GetHpcScheduleConfig` | `{workspace_id}` | `{enable_auto_stop, auto_stop_ruleset, enable_max_running_time, max_running_time_days/hours/minutes, predef_node_spec}` **或字面量 `null`** | `resources policy` |
+| `ListSlurmdPodEvent` | `{instance_id, page_size, PageNumber}` | `{events[], total}` (`str`) | `hpc events --instance` |
+| `GetJobLog` | `{page_size, filter:{podNames[], start_timestamp_ms, end_timestamp_ms}}` | `{logs[], total}` (`int`) | `hpc logs` |
+| `GetHpcScheduleConfig` | `{workspace_id}` | `{enable_auto_stop, auto_stop_ruleset, enable_max_running_time, max_running_time_days/hours/minutes, predef_node_spec}` or `null` | `resources policy` |
 | `StopJob` | `{job_id}` | `{job_id, sub_code, sub_msg}` | `hpc stop` |
 | `DeleteJob` | `{job_id}` | `{job_id, sub_code, sub_msg}` | `hpc delete` |
-| `GetTaskMetric` | 见 [8.14](#814-metrics--gettaskmetric) | `{time_seris_metric_groups[]}` | `hpc metrics` |
+| `GetTaskMetric` | See [Section 8.14](#814-metrics--gettaskmetric) | `{time_seris_metric_groups[]}` | `hpc metrics` |
 
-| 项 | 事实 | 后果 |
-| --- | --- | --- |
-| 键名不一致 | `ListJobInstances` 的 id 键是驼峰 **`jobId`**；`ListJobEvents` 的分页键也是驼峰 `pageNum` / `pageSize` | 与同路由其它 Action 的 `job_id` / `page_num` 不一致，不能类推 |
-| `GetJob.steps` | 「程序到底跑没跑」的唯一信号，形如 `已完成/总数`：创建后 `-/-`，平台**静态解析 entrypoint** 后变 `-/N`（N = 正文里 `srun` 的个数，没有就是 `-/0`），跑完 `N/N` | `SUCCEEDED` + `steps=0/0`（正文没 `srun`）与 `SUCCEEDED` + `steps=1/1` 在其它字段上完全一样。**报 HPC 状态必须把 `steps` 一起报** |
-| `GetJob.nodes` | Slurm 集群的实际落点，停止的任务恒为 `[]`；pod 级落点使用 `ListJobInstances.node`，另有 `component` ∈ `slurmctld` / `slurmd` | **空数组要读作「没在跑」而不是「读不到」** |
-| 实例名必须带命名空间 | `GetJobLog` 与 `ListSlurmdPodEvent` 都要 `<ns>/<pod>` | 日志端裸名报 `InvalidParameter: … expect 1, but got 0`；事件端裸名和 `job_id` 都**静默回空** |
-| `GetJobLog` sorter | 要么不发，要么发控制台那一对 `[{field:"@timestamp"}, {field:"log-id.keyword"}]`；只发其中一个报 `InternalError: 日志排序字段不合法` | Wrapper 不发，排序在客户端做 |
-| `GetJobLog` 时间窗 | `start` 必须早于 `end`（倒过来报 `InternalError: 日志查询时间参数不合法`）；超过一个月报 `InternalError: 日志查询时间区间不能超过1个月`，Wrapper 用 `HPC_LOG_MAX_WINDOW_MS`（30 天）挡在前面 | **控制台自己发的就是倒序的一对**（start 在 end 之后约 12 小时），网页端的聚合日志在这条路径上是坏的，不要照抄 |
-| `GetJobLog` 分页 | `page_size` 省略或传 `-1` 都只回 100 条，`PageNumber` 被彻底忽略，而且 `page_size=N` **保留的是最旧的 N 条** | 「最后 N 条」平台点不到，必须先取满窗口再在客户端截尾 |
-| `ListSlurmdPodEvent` | `page_size` 必发（省略回空列表配非零 `total`）。行没有 `type` 也没有 `count`——**平台按发生次数逐行重复**（一个实例 `total=106`，去重后 20 行） | 读事件前要自己折叠，否则 `--tail 20` 全是同一条 |
-| 名字键 | 列表行是 `job_name`，`name` 从来没被填充过 | 读 `name` 会让每个任务都没有名字，列表 N/A 且 Name Resolver 匹配不到 |
-| 删除顺序 | 要求先停止，运行中 `Conflict`，id 不存在 `ResourceNotFound`。**`SUCCEEDED_RETAINING` / `FAILED_RETAINING` 也算「运行中」**：`DeleteJob` 答 `Conflict`，`StopJob` 返回成功却不解除保留态，只能等平台释放 | 清理脚本按状态离开 `*_RETAINING` 重试，**不要按 `StopJob` 的返回值判断** |
-| discovery 与线上不一致 | `ListJobs` 声明 `PageNumber`，实发 `page_num` | 以实发为准 |
+**HPC notes:**
+- Casing inconsistencies: `ListJobInstances` requires camelCase `jobId`; `ListJobEvents` requires `pageNum`/`pageSize`; list rows populate `job_name` (never `name`).
+- `GetJob.steps` (`completed/total`, e.g., `1/1` vs `0/0`) is statically parsed from `srun` invocations in `entrypoint` and is the only field that distinguishes a job that ran `srun` steps from one that did not.
+- `GetJobLog` and `ListSlurmdPodEvent` require namespaced `<ns>/<pod>` identifiers. `GetJobLog` rejects windows > 30 days (`HPC_LOG_MAX_WINDOW_MS`), ignores `PageNumber`, and returns the **oldest** `page_size` lines (so tailing requires fetching the window and slicing client-side). `ListSlurmdPodEvent` emits one duplicate row per occurrence without a `count` field (deduplicated client-side).
+- Jobs in `SUCCEEDED_RETAINING` or `FAILED_RETAINING` reject `DeleteJob` with `Conflict`, and `StopJob` is a no-op on retaining jobs — wait for the platform to transition them to `SUCCEEDED` / `FAILED`.
 
 ---
 
-### 8.3 `ray` — 弹性计算
+### 8.3 `ray` — Elastic Compute
 
-Referer：`/jobs/ray`。
+Referer: `/jobs/ray`.
 
-| Action | 请求体 | 响应（`Result` 内） | CLI |
+| Action | Request Keys | Response (`Result`) | CLI Consumer |
 | --- | --- | --- | --- |
-| `CreateJob` | 见[创建面字段合同](#9-创建面的字段合同) | `{ray_job_id, sub_code, sub_msg}` | `ray create`、`ray batch` |
-| `GetJob` | `{ray_job_id}` | `status` / `head_node{}` / `worker_groups[]` / `entrypoint` / `creator{}` / `priority_name` | `ray status`、`ray metrics` |
-| `ListJobs` | `{workspace_id, page_num, page_size, filter_by:{user_id:[…]}}` | `{items[], total}`（字符串） | `ray list`、Name Resolver |
+| `CreateJob` | See [Section 9](#9-creation-payload-contracts) | `{ray_job_id, sub_code, sub_msg}` | `ray create`, `ray batch` |
+| `GetJob` | `{ray_job_id}` | `status`, `head_node{}`, `worker_groups[]`, `entrypoint`, `creator{}`, `priority_name` | `ray status`, `ray metrics` |
+| `ListJobs` | `{workspace_id, page_num, page_size, filter_by:{user_id:[…]}}` | `{items[], total}` (`str`) | `ray list`, Name Resolver |
 | `ListJobCreators` | `{workspace_id}` | `{items[]}` | — |
-| `ListJobEvents` | `{ray_job_id, page_num, page_size, sorter:[{field:"last_timestamp", sort}], filter:{object_ids[]}?}` | `{items[], total}` | `ray events`、`--instance` |
+| `ListJobEvents` | `{ray_job_id, page_num, page_size, sorter:[{field:"last_timestamp", sort}], filter:{object_ids[]}?}` | `{items[], total}` | `ray events`, `--instance` |
 | `ListJobInstances` | `{ray_job_id, page_num, page_size}` | `{items[], total}` | `ray instances` |
-| `ListJobScalingHistories` | `{ray_job_id, page_num, page_size, worker_group_name?}` | `{items[], total}`（字符串） | `ray scaling` |
-| `GetJobLog` | `{page_size, filter:{podNames[], start_timestamp_ms, end_timestamp_ms}}` | `{logs[], total}`（int） | `ray logs` |
+| `ListJobScalingHistories` | `{ray_job_id, page_num, page_size, worker_group_name?}` | `{items[], total}` (`str`) | `ray scaling` |
+| `GetJobLog` | `{page_size, filter:{podNames[], start_timestamp_ms, end_timestamp_ms}}` | `{logs[], total}` (`int`) | `ray logs` |
 | `StartJob` | `{ray_job_id}` | `{ray_job{}}` | `ray start` |
 | `StopJob` | `{ray_job_id}` | `{ray_job{}}` | `ray stop` |
 | `DeleteJob` | `{ray_job_id}` | `{ray_job{}}` | `ray delete` |
-| `GetTaskMetric` | 见 [8.14](#814-metrics--gettaskmetric) | `{time_seris_metric_groups[]}` | `ray metrics` |
+| `GetTaskMetric` | See [Section 8.14](#814-metrics--gettaskmetric) | `{time_seris_metric_groups[]}` | `ray metrics` |
 
-| 项 | 事实 | 后果 |
-| --- | --- | --- |
-| 资源键 | 每个 Action 都是 `ray_job_id`（`job_id` / `id` 报 `unknown field`）。**唯一例外是 `GetJobLog`**：它反过来只认 `job_id` | 与 `train` / `hpc` 不同，不能类推 |
-| `GetJobLog` 的定位方式 | `job_id` 不 scope 任何东西（单独发答 `InternalError`）。真正的定位是 `filter.podNames`，平台反解回唯一一个 job，权限检查也落在这里 | 控制台对 `ray` 不发 `job_id`，Wrapper 照做 |
-| `GetJobLog` 的 filter | 只收 `podNames` / `start_timestamp_ms` / `end_timestamp_ms`；`worker_group_name`、`instance_type`、`keyword`、`object_type` 全是 `unknown field`。时间戳是字符串型 epoch 毫秒 | — |
-| 空 `podNames` | 回一个干净的 `{"logs": [], "total": 0}` | 与「这个集群什么都没打印」不可区分，Wrapper 在发出前就拒绝 |
-| `ListJobEvents` 的信封是专用的 | 资源键是 `ray_job_id`，不是 `filter.object_ids`；一次调用同时返回 `object_type: "job"`（如 `CreatedRayCluster` / `CreatedService`）和 `"instance"` 两级事件 | **不需要像 `hpc.ListSlurmdPodEvent` 那样按实例扇出** |
-| `filter.object_ids` | 有效：给 Pod 名收窄到那些实例并滤掉控制器行；不认识的 id 回空列表。`filter.object_type` 只认字面量 `instance` | Wrapper 只发 `object_ids` |
-| 事件形状 | K8s 形状（`reason` / `type` / `message` / `first_timestamp` / `last_timestamp` / `count`），但上报方在 `source_component` 而不是 `from`，另有单调递增的 `id`。**时间戳只到秒** | 同秒次序还随 filter 变，客户端排序要拿 `id` 做 tiebreaker，否则「倒着取一屏再翻回来」会把因果顺序翻反。关键信号：提交时 `CreatedRayCluster`(Normal)、卡 PENDING 时 `FailedScheduling`(Warning) |
-| 状态机拒绝报成 `InternalError` | `InternalError: RayJob status not allow <动词>`，而不是 `Conflict`。对非 STOPPED `StartJob`、对已 STOPPED `StopJob` 都走这条 | `InternalError` 在瞬时名单里，于是一个「永远不可能成功」的拒绝被读成「平台暂时不舒服」，还白烧三次重试。只有 `DeleteJob` 给的是 `Conflict` |
-| 实例行 | `instance_id` / `instance_type`(`head`/`worker`) / `worker_group_name` / `status` / `cpu_count` / `memory_size` / `gpu_count` / `priority_level` / `created_at` / `name` / `node_name` / `pod_ip` / `started_at` / `priority_name` / `ray_job_id` | — |
-| 属主与优先级键 | 列表行用 `creator` 和 `priority_name`；`created_by` 和 `priority` 恒为 null | 只读那两个会让每个任务都没有属主、优先级恒 None |
-| 日志行 | `log_id` / `message` / `node` / `pod_name` / `time` / `timestamp_ms`（字符串）/ `timestamp_str`。`time` 带 `+08:00`，`timestamp_str` 是 Z 归一化形式 | — |
-| Workspace scoping | 顶层 `workspace_id`，`filter` 嵌套会被拒 | — |
-| 没有 Console 变体 | `ray` 对 `CreateJobConsole` 答 `InvalidAction`，创建走 `CreateJob` | — |
-| Scaling 与日志边界 | `ListJobScalingHistories` 的空历史是合法的 `{items: [], total: "0"}`；`GetJobLog` 的实例解析先于时间窗校验，Wrapper 对窗口做 30 天上限保护 | 空历史不能读成请求失败；日志窗口不依赖平台是否先完成实例解析 |
-| 镜像前提 | Ray Job 的镜像必须自行包含可执行的 `ray` Runtime，镜像可见不代表满足该前提 | 创建前在项目基底镜像中验证 `ray`，CLI 无法替镜像补运行时 |
-
-**`UpdateJob` 查过、刻意不接**：只能改停止的任务（运行中答 `Conflict: Ray Job 正在运行中`）。在真实 STOPPED 任务上逐字段量过，**真正可写的只有 `name` 和 `description`**；另外 27 个候选键——含 `worker_groups` / `head_node` / `min_replicas` / `max_replicas` / `replicas` / `task_priority` 等所有可能的伸缩杠杆——全部 `unknown field`，`ScaleJob` / `UpdateWorkerGroup` / `ResizeJob` 也都 `InvalidAction`。**弹性区间在创建时就定死了**，而 Name-only 的 CLI 改名等于让自己的名称索引失效。
+**Ray notes:**
+- Every Action uses `ray_job_id` except `GetJobLog`, which scopes solely via `filter.podNames` (rejecting empty `podNames` client-side).
+- `ListJobEvents` returns both `"job"` and `"instance"` events in a single call; use monotonic event `id` as a tiebreaker for identical 1-second timestamps.
+- Invalid state transitions on `StartJob` / `StopJob` return `InternalError: RayJob status not allow <verb>` rather than `Conflict` (do not retry as transient).
+- `UpdateJob` only allows mutating `name` and `description` on stopped jobs (worker group min/max replicas are immutable after creation) and is intentionally not wrapped.
 
 ---
 
-### 8.4 `notebook` — 交互式建模
+### 8.4 `notebook` — Interactive Modeling
 
-Referer：`/jobs/interactiveModeling`。
+Referer: `/jobs/interactiveModeling`.
 
-| Action | 请求体 | 响应（`Result` 内） | CLI |
+| Action | Request Keys | Response (`Result`) | CLI Consumer |
 | --- | --- | --- | --- |
-| `CreateNotebook` | 见[创建面字段合同](#9-创建面的字段合同) | `{notebook_id, sub_code, sub_msg}` | `notebook create`、`notebook batch` |
-| `GetNotebook` | `{notebook_id}` | `status` / `sub_status` / `workspace{}` / `project{}` / `logic_compute_group{}` / `quota{}` / `node{}` / `extra_info{}` / `dataset_info[]` | `notebook status` / `metrics` / `exec` / `shell` / `ssh` / `proxy-url`、`wait` 轮询 |
-| `ListNotebooks` | `{workspace_id, page, page_size, filter_by:{keyword, user_id[], logic_compute_group_id[], status[], mirror_url[]}, order_by:[{field:"created_at", order:"desc"}]}` | `{list[], total}`（int） | `notebook list`、Name Resolver |
+| `CreateNotebook` | See [Section 9](#9-creation-payload-contracts) | `{notebook_id, sub_code, sub_msg}` | `notebook create`, `notebook batch` |
+| `GetNotebook` | `{notebook_id}` | `status`, `sub_status`, `workspace{}`, `project{}`, `logic_compute_group{}`, `quota{}`, `node{}`, `extra_info{}`, `dataset_info[]` | `notebook status` / `metrics` / `exec` / `shell` / `ssh` / `proxy-url`, `wait` |
+| `ListNotebooks` | `{workspace_id, page, page_size, filter_by:{keyword, user_id[], logic_compute_group_id[], status[], mirror_url[]}, order_by:[{field:"created_at", order:"desc"}]}` | `{list[], total}` (`int`) | `notebook list`, Name Resolver |
 | `ListNotebookCreators` † | `{workspace_id}` | `{list[], total}` | — |
-| `ListNotebookEvents` | `{notebook_id, page, page_size}` | `{list[]\|events[], total}` | `notebook events`、create 的等待预览 |
+| `ListNotebookEvents` | `{notebook_id, page, page_size}` | `{list[]\|events[], total}` | `notebook events`, `create --wait` |
 | `ListNotebookLifecycles` | `{notebook_id, page, page_size, start_time?, end_time?}` | `{list[]}` | — |
 | `ListRunIndex` | `{notebook_id}` | `{list[{index, start_time, end_time}]}` | `notebook lifecycle` |
 | `StartNotebook` | `{notebook_id}` | `{notebook_id, sub_code, sub_msg}` | `notebook start` |
 | `StopNotebook` | `{notebook_id}` | `{notebook_id, sub_code, sub_msg}` | `notebook stop` |
 | `DeleteNotebook` | `{notebook_id}` | `{notebook_id, sub_code, sub_msg}` | `notebook delete` |
-| `SaveNotebookImage` | `{notebook_id, name, version, description, flatten}` | **恒为 `{}`**（`Result: null`） | `notebook save-image` |
-| `EstimateSaveMirrorSize` | `{notebook_id}` | `{active_snapshot_size}` | `notebook save-image`、`--dry-run` |
+| `SaveNotebookImage` | `{notebook_id, name, version, description, flatten}` | Always `{}` | `notebook save-image` |
+| `EstimateSaveMirrorSize` | `{notebook_id}` | `{active_snapshot_size}` | `notebook save-image`, `--dry-run` |
 | `CancelSaveMirror` | `{notebook_id}` | — | `notebook cancel-save-image` |
-| `CheckNotebook` † | `{name, workspace_id}` | 占用时 `{notebook_id, sub_code, sub_msg}`；空闲时 `Result: null` | create 的重名前置校验 |
-| `GetNotebookAccessUrl` | `{notebook_id}` | `{jupyter_url, vscode_url}` | `notebook proxy-url` / `exec` / `shell`、SSH 链路 |
+| `CheckNotebook` † | `{name, workspace_id}` | `{notebook_id, sub_code, sub_msg}` if taken; `null` if free | Pre-creation duplicate name check |
+| `GetNotebookAccessUrl` | `{notebook_id}` | `{jupyter_url, vscode_url}` | `notebook proxy-url` / `exec` / `shell`, SSH bridge |
 | `GetRealtimeNotebookMetric` | `{notebook_id}` | `{resource_metric_list[]}` | `notebook metrics --now` |
-| `GetScheduleConfig` | `{WorkspaceId}` | Workspace 调度策略全集 + 四份**规格菜单** `quota` / `predef_train_spec` / `rayjob_quota` / `serving_quota` | `resources policy`、`<workload> quota` 的 Priority 列、create 的优先级预检 |
-| `GetTaskMetric` | 见 [8.14](#814-metrics--gettaskmetric) | `{time_seris_metric_groups[]}` | `notebook metrics` |
+| `GetScheduleConfig` | `{WorkspaceId}` | Workspace schedule policies + JSON-encoded quota menus (`quota`, `predef_train_spec`, `rayjob_quota`, `serving_quota`) | `resources policy`, `<workload> quota` Priority column, creation priority precheck |
+| `GetTaskMetric` | See [Section 8.14](#814-metrics--gettaskmetric) | `{time_seris_metric_groups[]}` | `notebook metrics` |
 
-| 项 | 事实 | 后果 |
-| --- | --- | --- |
-| 列表键与 total | 分页列表键是 **`list`**（与 `ray` 相反），`total` 是 int（与 `hpc` 相反） | 逐 Action 实测，不要类推 |
-| `ListRunIndex` | 无分页，传 `PageNumber` 直接报错。`end_time = ""` 的那条是当前运行周期，按 `index` 从旧到新 | 控制台「生命周期」页用的是它；`ListNotebookLifecycles` 对绝大多数 Notebook 返回空 |
-| `ListNotebookEvents` 的事件形状 | 平台自有形状而非 K8s：`content`（正文）、`created_at`（epoch-ms 字符串）、`event_id`。共享渲染器把 `content → message`、`created_at → last_timestamp` / `first_timestamp` | 事件从旧到新返回，Wrapper 默认自动翻页到 `total`（安全上限 100 页） |
-| 找不到资源 | 返回 `ResourceNotFound`，HTTP 仍是 200 | 靠状态码判断「不存在」的调用方会读到「找到了」 |
-| `node{}` | 是整个节点对象：`name`（如 `cpu-nat-351`）、`status`、`cordon_type`、`is_maint`、`resource_pool`、`cpu_count` / `memory_size` / `gpu_count`。**STOPPED 时不清空对象，而是把 `name` 置空、`status` 置成 proto 零值 `UNKNOWN_NODE_STATUS`** | 只判空对象会把「没在跑」读成「有一个状态未知的节点」。第二个来源 `extra_info`（`NodeName` / `HostIP` / `PodName` / `ContainerID`）停止时同样是空串而不是缺键 |
-| `GetRealtimeNotebookMetric` 的空 handle | 收到空 / 缺失的 `notebook_id` **不报错**，而是用成功信封返回集群汇总 | 不做前置校验会把集群数据误印成单个 Notebook 指标。**Wrapper 必须在发出前拒绝空 handle** |
-| 它的返回形状 | 固定四行 `{resource_name, total, used, available, usage_rate, unit, spec}`，`usage_rate` 是 0–1，`unit` 只有 Memory 是 `"GB"`，`spec` 恒空，没有 disk / network | **STOPPED 的 Notebook 四行全 0 且 HTTP 成功**，与「RUNNING 但空闲」不可区分，命令层必须同时打印状态 |
-| `GetNotebookAccessUrl` | 是 **IDE 网关地址**，不是 Notebook 反向代理。两个 URL 归一化后指向同一个网关，任取其一。STOPPED 时返回两个空字符串 | 解析顺序：缓存/热候选 → 本 Action → Playwright，收口在 `resolve_notebook_vscode_ide_url`；`refresh=True` 时本档**也走**（refresh 是「别信缓存」，不是「一定要抓」） |
-| `exec` / `shell` 全程不起浏览器 | lab URL 取**原始 `jupyter_url`**（不能用归一化后的形式——terminal 的 REST 与 WebSocket 路由挂在 Jupyter server base 上）；`_xsrf` 靠对 `jupyter_url` 发一次普通 GET 拿 cookie；建/删 terminal 是 `POST` / `DELETE api/terminals`，`_xsrf` 放进 `X-XSRFToken` 头 | 命令结束后回收本次创建的 Terminal |
-| JupyterTransport 不消费未核验的名称缓存句柄 | Transport 预检发现 GPU 探针不通或将使用 H100/H200 JupyterTerminal 时，会按同一名称和 Workspace Live 重解一次；旧实例被删后重建时，当前句柄覆盖缓存后才进入用户命令。`--ignore-target-cache` 从第一次解析起就强制 Live | 恢复发生在只读探针之前，不会为了修缓存而重放用户命令；手动 `cache refresh` 不是恢复步骤 |
-| `EstimateSaveMirrorSize` | `active_snapshot_size` 单位是字节，线上是**十进制字符串**（discovery 声明 int64）。它是容器可写层的增量，不是最终镜像大小。非 RUNNING 答 `InvalidParameter: Cannot save image of non-running notebook: <id>`（**内嵌 raw id，投影时必须折掉**），未知 id 答 `ResourceNotFound` | 取不到大小要读作「未知」，**绝不能读作 0** |
-| `SaveNotebookImage` 的字段面 | discovery 声明并且线上接受 `notebook_id`（唯一必填）/ `name` / `version` / `description` / `accessible`(int32) / `support_brand_list` / `flatten`(bool)。**不收 `visibility`**（`unknown field`）；**`accessible` 只有两档**（1 个人可见 / 2 公开可见） | CLI 可见性有三档，所以 `accessible` 替代不了存完再 `image.UpdateImage` 那一步。它也不返回新镜像 id，只能靠列表找 |
-| 优先级限制只在 `GetScheduleConfig` 里 | 四个 `*_quota` / `predef_train_spec` 的值是 **JSON 编码的字符串**（不是数组），元素 `{id, cellId, name, cpu_count, memory_size, gpu_count, gpu_type, logic_compute_group_ids, allowed_priority_levels}`。`id` 就是配额目录里的 `quota_id` | 这是把优先级限制 join 到配额目录上的键。`allowed_priority_levels` 取 `null` / `[]`（不限）或 `["low"]`，具体限制读 Live；`logic_compute_group_ids` 为空表示对所有组开放。HPC 的 `predef_node_spec` 不在这份记录里 |
-| 它是调度策略的全集 | `GetNotebookScheduleConfig`、`ray.GetRayJobScheduleConfig`、`train.GetTrainScheduleConfig` 都是它的严格子集，所以只接这一个 | 它与**管理员专用**的 `workspace.GetScheduleConfig` 只是重名 |
-| `allow_ssh: true` 硬编码 | 平台据此在代理地址上暴露容器内的 rtunnel 端口 | 缺了它代理返回 404，Notebook SSH 的预检完不成。该字段省略时默认 false，与镜像里有没有 SSH 工具无关 |
-
-**`flatten` 是生效字段**：`false` 保留基底层并追加增量层，`true` 将结果合并为单层，被后续层覆盖或删除的内容不再保留。两种结果都能再次创建 Notebook；压平增加的是镜像 `CREATING` 阶段，不延长 Notebook 的 COMMITTING 占用。最终体积、层数差值和耗时取决于基底与可写层内容，不属于通用合同；`EstimateSaveMirrorSize` 返回的也是未压缩可写层增量，不能当作最终镜像大小。
-
-**`SaveMirror` 与 `SaveNotebookImage` 是两个 handler**：控制台调的是前者（不在 discovery 里，活着）。`SaveNotebookImage` 空 body 答 `InvalidParameter: NotebookId is required` 并做严格 proto 解析；`SaveMirror` 空 body 答 `InternalError: 非法的镜像名称或版本`，**未知字段一声不吭**。CLI 留在 `SaveNotebookImage`：它在 discovery 里、报错能用来测字段，`flatten` 也已在它上面验过。
-
-**`GetRealtimeNotebookMetricByTime` 刻意不接**：只收 `notebook_id`（`time_range` / `metric_types` 都是 `unknown field`），固定约一小时窗口、5 秒粒度。`metrics --window 1h` 已用同样四个指标覆盖同一小时，而 CLI 只打 min/max/avg/last 加 sparkline，5 秒与 60 秒的差别在这个粒度上不可见；它又只存在于 `notebook` 路由，进不了共享的 metrics 命令工厂。
+**Notebook notes:**
+- `GetNotebook.node` is not cleared to `{}` when `STOPPED`; instead `node.name` becomes `""` and `node.status` becomes `"UNKNOWN_NODE_STATUS"`.
+- `GetRealtimeNotebookMetric` returns cluster-wide totals if `notebook_id` is empty — always validate a non-empty `notebook_id` before calling.
+- `GetNotebookAccessUrl` returns the raw `jupyter_url` used for headless `JupyterTerminal` REST/WebSocket calls (`GET` for `_xsrf` cookie, `POST`/`DELETE api/terminals` with `X-XSRFToken`).
+- `SaveNotebookImage` only supports 2-level `accessible` (`1` private, `2` public) and returns `{}`; the CLI resolves the saved image from `image.ListImages` and applies 3-level visibility (`private` / `project` / `public`) via `image.UpdateImage`.
+- `GetScheduleConfig` is the superset of all workload schedule configs and provides `allowed_priority_levels` keyed by `quota_id`.
+- `CreateNotebook` always sends `allow_ssh: true` so the Notebook proxy exposes the container's `rtunnel` port.
 
 ---
 
-### 8.5 `inference_serving` — 模型部署
+### 8.5 `inference_serving` — Model Serving
 
-Referer：`/jobs/modelDeployment`。路由名是**下划线**形式。
+Referer: `/jobs/modelDeployment`. Route uses an **underscore** (`inference_serving`).
 
-| Action | 请求体 | 响应（`Result` 内） | CLI |
+| Action | Request Keys | Response (`Result`) | CLI Consumer |
 | --- | --- | --- | --- |
-| `CreateServingConsole` † | 见[创建面字段合同](#9-创建面的字段合同) | `{inference_serving_id, sub_code, sub_msg}` | `serving create`、`serving batch` |
-| `ListServings` | `{workspace_id, page, page_size, filter_by:{my_serving:true, keyword?, project_id[]?, status[]?, inference_serving_type[]?}}` | `{inference_servings[], total}` | `serving list`、Name Resolver |
-| `GetServing` | `{inference_serving_id}` | `status` / `replicas` / `node_num_per_replica` / `model_id` / `model_version` / `mirror_id` / `port` / `command` / `resource_spec_price{}` / `extra_info{node_names[], service}` | `serving status`、`serving api`、`serving metrics` |
+| `CreateServingConsole` † | See [Section 9](#9-creation-payload-contracts) | `{inference_serving_id, sub_code, sub_msg}` | `serving create`, `serving batch` |
+| `ListServings` | `{workspace_id, page, page_size, filter_by:{my_serving:true, keyword?, project_id[]?, status[]?, inference_serving_type[]?}}` | `{inference_servings[], total}` | `serving list`, Name Resolver |
+| `GetServing` | `{inference_serving_id}` | `status`, `replicas`, `node_num_per_replica`, `model_id`, `model_version`, `mirror_id`, `port`, `command`, `resource_spec_price{}`, `extra_info{node_names[], service}` | `serving status` / `api` / `metrics` |
 | `ListServingVersions` | `{inference_serving_id}` | `{inference_servings[]\|list[], total}` | `serving versions` |
 | `ListServingInstances` | `{inference_serving_id, page, page_size}` | `{groups[{items[]}], total}` | `serving instances` / `logs` / `events --instance` |
-| `ListServingEvents` | `{page, page_size, filter:{object_type, object_ids[]}}` | `{events[]\|items[]\|list[]}` | `serving events`、`--instance` |
-| `ListServingScaleHistory` | `{inference_serving_id, page, page_size}` | `{scale_history_items[], total}`（字符串） | `serving scale-history` |
+| `ListServingEvents` | `{page, page_size, filter:{object_type, object_ids[]}}` | `{events[]\|items[]\|list[]}` | `serving events`, `--instance` |
+| `ListServingScaleHistory` | `{inference_serving_id, page, page_size}` | `{scale_history_items[], total}` (`str`) | `serving scale-history` |
 | `GetServingLog` | `{page_size, filter:{podNames[], start_timestamp_ms, end_timestamp_ms}}` | `{logs[], total}` | `serving logs` |
 | `GetServingScheduleConfig` | `{workspace_id}` | `{enable_auto_stop, items[{auto_stop_ruleset, gpu_count_min, gpu_count_max}]}` | `resources policy` |
 | `GetServingApiMetric` | `{inference_serving_id, metric_types[], time_range:{start_timestamp, end_timestamp, interval_second}}` | `{metric_groups[]}` | `serving api-metrics` |
 | `GetInferenceServingTerms` | `{inference_serving_id}` | `{terms[]}` | — |
 | `GetServingConfigByWorkspaceId` | `{workspace_id}` | `{configs{}}` | `serving configs` |
-| `GetInferenceServingUserProjectList` | `{workspace_id}` | `{projects[], users[]}` | create 的项目/用户选择 |
+| `GetInferenceServingUserProjectList` | `{workspace_id}` | `{projects[], users[]}` | Project/user resolution for `create` |
 | `StartServing` | `{inference_serving_id}` | `{inference_serving_id, sub_code, sub_msg}` | `serving start` |
 | `StopServing` | `{inference_serving_id}` | `{inference_serving_id}` | `serving stop` |
 | `ScaleServing` | `{inference_serving_id, replica}` | — | `serving scale` |
 | `RollbackServing` | `{inference_serving_id, version}` | `{inference_serving_id, sub_code, sub_msg}` | `serving rollback` |
 | `DeleteServing` | `{inference_serving_id}` | `{inference_serving_id}` | `serving delete` |
-| `GetTaskMetric` | 见 [8.14](#814-metrics--gettaskmetric) | `{time_seris_metric_groups[]}` | `serving metrics` |
+| `GetTaskMetric` | See [Section 8.14](#814-metrics--gettaskmetric) | `{time_seris_metric_groups[]}` | `serving metrics` |
 
-| 项 | 事实 | 后果 |
-| --- | --- | --- |
-| 创建必须用 Console 变体 | discovery 里那个 `CreateServing` 的 Description 明写「via OpenAPI with simplified config」，契约确实不同：要 `spec_id` 而不是 `resource_spec_price`，`image` 是普通字符串而不是 `mirror_id`，且不收 `description` / `inference_serving_type` / `model_source` | **看到写操作的字段被大面积拒绝时，第一反应应该是「是不是找错 Action 了」，而不是「契约变了」** |
-| `ScaleServing` 的字段是单数 | `replica`，而 create 和 `UpdateServing` 用复数 `replicas` | — |
-| `StartServing` / `StopServing` | 只收 `{inference_serving_id}`，请求体里的 `version` 会被拒 | 这两条曾经用手写的 `code != 0` 解包，对任何输入都返回 `API error: None`——**解包不走 `_v2_result()` 会把真错误伪装成假错误** |
-| `DeleteServing` | 要求先停止，运行中答 `Conflict`；id 不存在答 `ResourceNotFound` | 清理路径必须 `StopServing` → 轮询到 `STOPPED` → `DeleteServing` |
-| `ListServingInstances` 的行是嵌套的 | `{groups: [{items: [...]}], total}`，一个副本一个 group | 按顶层读会拿到空列表配非零 `total`，而那正好是「这个部署还没有 Pod」的形状——**失败静默且永久** |
-| 实例行字段 | `name`（**带命名空间** `<project>/<pod>`）、`component_type`(`LEADER`/`WORKER`)、`status`、`node`、`ready`、`restarts`、`term`、`created_at` / `started_at` / `finished_at`、`running_time_ms` | — |
-| `ListServingEvents` 的两级 | `INFERENCE_SERVING` 给部署级（`CreatingRevision` / `GroupsProgressing` / `Pending`），`INFERENCE_SERVING_INSTANCE` 给 Pod 级（`Scheduled` / `Pulled` / `Created` / `Started` / `Unhealthy`），两者不相交 | **Pod 级的 `object_ids` 必须带命名空间**，裸 pod 名答 `InternalError` |
-| 列表键 | `ListServingScaleHistory` 是 `scale_history_items`，不是 `items` 也不是 `list` | 曾经按 `items` 读，任何有扩缩容历史的 serving 都返回空列表——读错键就永远看不到数据 |
-| 调用地址 | `ListServings` 行和 `GetServing` 详情的 `extra_info.service`；停止态也可能保留地址 | 列表直接复用该字段，不逐条查详情；不按名字、域名前缀或容器端口拼接 URL，地址存在不代表就绪 |
-| 创建后读取 | 创建已成功但详情读取失败或未返回 Endpoint 时，CLI 保留 created 结果并提示稍后查询 | `--dry-run` 不预测 Endpoint；详情读取失败不能诱发重复创建 |
-| 节点落点 | 在 `GetServing` 的 `extra_info.node_names[]`，顶层只有 `node_num_per_replica`（每副本几个节点，是规格） | 按顶层读会让每个部署都显示成没落点 |
-| `GetServingLog` 的坏 pod 名 | 答 `InternalError` | 看着像平台故障，实际含义是「pod 名不对」 |
-| 两个指标族不相干 | `GetServingApiMetric` 是请求流量：`QPS`、`SUCCESS_QPS`、`FAIL_QPS`、`SUCCESS_RATE`、`FAIL_RATE`、`REQUEST_COUNT`、`LATENCY`、`TTFT`(+`_P50`/`_P95`/`_P99`)、`TTLT`(+同)、`INPUT_TOKENS`、`OUTPUT_TOKENS`。它**接受整个 `metric_types` 列表**（`GetTaskMetric` 不接受），也不需要计算组句柄 | 与 `GetTaskMetric` 共享零个指标名。返回项带 `metric_type` / `group_name` / `data_unit` / `time_series[{timestamp, data}]` |
-| Serving 不一定要 GPU | 是否提供 CPU-only 档位由目标 Workspace / Compute Group 的 Live Quota 目录决定 | `GetServingConfigByWorkspaceId` 的 GPU 区间是自动停机规则适用范围，**不是创建下限** |
-| `GetServingScheduleConfig` | 回收规则**按 GPU 档位**给（每个 `items` 元素带 `gpu_count_min` / `gpu_count_max`），一个 Workspace 会有多条 | — |
-
-**`UpdateServing` 当前不封装。** 四条合同约束叠在一起让它对 Agent 不安全：
-
-| 约束 | 内容 |
-| --- | --- |
-| 状态限制 | 只能在 `FAILED` 或 `STOPPED` 下调用，运行中答 `This serving can only be updated in FAILED or STOPPED status.` |
-| 结构不对称 | `resource_spec_price` 必须是**扁平**结构，而 `GetServing` 读回的是**嵌套**结构（带 `cpu_info` / `gpu_info`）。**读回来的对象不能直接喂回去**，原样发送答 `unknown field "cpu_info"` |
-| 全量替换 | 省略的字段会被清空，包括 `command` 这类已有值 |
-| 版本递增 | 每次成功都会递增 `version`，下一次必须带新版本 |
-
-安全的 Wrapper 要把**全部**字段搬运一遍，而 `port_configs` / `runtime_attributes` / `traffic_config` / `custom_mounts` 这些 CLI 没有建模的字段一旦漏掉就被静默清空。改配置重建一个 serving 既便宜又安全。单字段的 `ScaleServing` 与 `RollbackServing` 不受这条影响。
-
-**`GetInferenceServingTerms` 不是调用说明**：`terms` 元素是 `{term, start_time, end_time}`，即**运行期次索引**（控制台用它把详情页各 tab 圈定到某一次运行），里面没有 endpoint、示例请求或 token。调用信息是 `GetServing` 的 `port` 和 `command`。
+**Serving notes:**
+- Always use `CreateServingConsole` (not OpenAPI `CreateServing`). `ScaleServing` takes singular `replica`.
+- `ListServingInstances` nests instances inside `groups[].items[]` (one group per replica), and instance `name` is namespaced (`<project>/<pod>`).
+- `ListServingEvents` uses `object_type: "INFERENCE_SERVING"` for deployment events and `"INFERENCE_SERVING_INSTANCE"` (with namespaced pod IDs) for pod events such as `Unhealthy`.
+- `GetServingApiMetric` accepts multiple `metric_types` in one request (`QPS`, `SUCCESS_QPS`, `FAIL_QPS`, `SUCCESS_RATE`, `FAIL_RATE`, `REQUEST_COUNT`, `LATENCY`, `TTFT`/`_P50`/`_P95`/`_P99`, `TTLT`/`_P50`/`_P95`/`_P99`, `INPUT_TOKENS`, `OUTPUT_TOKENS`).
+- `UpdateServing` is intentionally not wrapped because it only works in `FAILED`/`STOPPED` state, requires a flattened `resource_spec_price` incompatible with `GetServing`'s nested response, and overwrites omitted fields.
 
 ---
 
-### 8.6 `workspace` — 工作空间资源
+### 8.6 `workspace` — Cluster & Workspace Resources
 
-Referer：`/jobs/distributedTraining`。
+Referer: `/jobs/distributedTraining` (`/cluster/nodeList` for `cluster.ListNodeEvents`).
 
-| Action | 请求体 | 响应（`Result` 内） | CLI |
+| Action | Request Keys | Response (`Result`) | CLI Consumer |
 | --- | --- | --- | --- |
-| `ListLogicComputeGroups` | `{page_size: -1, page_num: 1, filter:{workspace_id}}` | `{logic_compute_groups[], total}` | `resources availability`、`<workload> quota`、每个 create 的组解析 |
-| `ListNodeDimension` | `{filter:{workspace_id, logic_compute_group_id}, PageNumber, page_size}` | `{node_dimensions[], total}` | `resources availability`（整节点列） |
-| `ListTaskDimension` | `{filter:{workspace_id, logic_compute_group_id?, user_id?, project_id?}, PageNumber, page_size}` | `{task_dimensions[], total}` | `resources usage`（Project/User/Task 归因）、`resources availability` 的低优任务归类 |
-| `ListUserDimension` | `{filter:{workspace_id, user_id?}, PageNumber, page_size}` | `{user_dimensions[], total}` | `resources usage --mine`（显式传当前用户） |
-| `GetLogicComputeGroupNodeSpecs` | `{workspace_id, logic_compute_group_id}` | `{node_specs[]}` | `resources availability`（整节点规格） |
-| `GetWorkspaceNodeSpecs` | `{workspace_id}` | `{node_specs[]}` | `resources availability`（整节点规格） |
+| `ListLogicComputeGroups` | `{page_size: -1, page_num: 1, filter:{workspace_id}}` | `{logic_compute_groups[], total}` | `resources availability`, `<workload> quota`, group resolution |
+| `ListNodeDimension` | `{filter:{workspace_id, logic_compute_group_id}, PageNumber, page_size}` | `{node_dimensions[], total}` | `resources availability` (full-node columns) |
+| `ListTaskDimension` | `{filter:{workspace_id, logic_compute_group_id?, user_id?, project_id?}, PageNumber, page_size}` | `{task_dimensions[], total}` | `resources usage`, low-priority attribution in `availability` |
+| `ListUserDimension` | `{filter:{workspace_id, user_id?}, PageNumber, page_size}` | `{user_dimensions[], total}` | `resources usage --mine` |
+| `GetLogicComputeGroupNodeSpecs` | `{workspace_id, logic_compute_group_id}` | `{node_specs[]}` | `resources availability` |
+| `GetWorkspaceNodeSpecs` | `{workspace_id}` | `{node_specs[]}` | `resources availability` |
 | `GetLogicComputeGroupResource` | `{workspace_id, logic_compute_group_id}` | `{logic_resouces{}, gpu_type_stats[], runtime_attributes[]}` | `resources availability` |
 | `GetWorkspaceQuota` | `{workspace_id}` | `{gpu_high_running, gpu_high_running_used, cpu_*, memory_*, is_fair_workspace, …}` | — |
 | `GetWorkspaceComputeResource` | `{workspace_id}` | `{logic_resouces{cpu_total, cpu_used, memory_gi_total, memory_gi_used, gpu_total, gpu_used, gpu_low_priority_used}}` | — |
-| `cluster.ListNodeEvents` | `{PageNumber, page_size, filter:{node_names[], from?}, sorter:[{field:"last_timestamp", sort}]}` | `{events[], total}` | `resources node-events`（Referer `/cluster/nodeList`） |
+| `cluster.ListNodeEvents` | `{PageNumber, page_size, filter:{node_names[], from?}, sorter:[{field:"last_timestamp", sort}]}` | `{events[], total}` | `inspire resources node-events` |
 
-| 项 | 事实 | 后果 |
-| --- | --- | --- |
-| `ListNodeEvents` 的 filter | `filter.node_names` 事实上必填：不给 filter 答 `{events: [], total: 0}`；节点名不认识同样是空列表而不是报错。`filter.from` 按上报组件收窄有效；`event_type` / `type` / `keyword` 全是 `unknown field`；discovery 声明的 `start_last_timestamp` / `end_last_timestamp` 答 `InternalError` | 空列表与「这个集群很安静」不可区分。行的类型字段叫 **`event_type`**，也**没有 `count`**；一次可给多个节点，行里带 `node_name` 自己署名。命令倒序读取最新 1000 行再恢复时间正序，避免固定页预算截掉最近事件；`--from` 服务端过滤，`--type` / `--reason` 在这 1000 行内过滤 |
-| 它覆盖的信号 | 内核 OOM kill、`TaskHung`、Cordon / Uncordon、`Rebooted`、`NodeNotSchedulable` | 平台上唯一按节点组织的事件源 |
-| `ListNodeDimension` 的两级 scoping | `filter` 里只放 `logic_compute_group_id` 返回 `AccessForbidden`，同时放 `workspace_id` 和 `logic_compute_group_id` 才通 | 最容易踩的一处 |
-| 维度族的 scoping | 只认嵌套 `filter.workspace_id`：顶层被拒为 `unknown field`，缺 workspace 则 `AccessForbidden`。`filter.logic_compute_group_id` 可选且真收窄；`ListUserDimension.filter.user_id` 是单个字符串，省略会返回 Workspace 全员而不是当前用户。`filter.task_type` 被**静默忽略**，`task_name_keyword` / `gpu_type` 有效 | `resources usage --mine` 必须先解析当前用户 id 再发送；不带会把别人的占用冒充成“我的” |
-| 维度族的分页 | `page_size: -1` 和省略都只回 10 行，即使 `total` 更大，必须按 `total` 显式翻页。正整数 `5000` 可用，Wrapper 以此为默认页并继续按 `total` 翻页；服务端短页不代表结束，节点和任务行跨页按 id 去重。超过安全页数而仍未读满 `total` 时抛错，不返回静默截断的资源事实；三种分页拼法都认，`total` 是 int | — |
-| 维度族的排序 | `order_by` 元素是 `{field, sort}` 而不是 `{field, order}`，只有 `created_at` 被采纳且 `sort` 被忽略（恒升序），`{"field":"gpu"}` / `{"field":"cpu"}` 直接 `InternalError` | **排序只能在客户端做** |
-| 维度行的内容 | 只含存活工作负载（`RUNNING` 加短暂的 `COMMITTING`），覆盖所有用户与所有 Workload 类型。**`gpu.used` 是死字段（恒 0）**，但 `gpu.usage_rate` / `cpu.usage_rate` 是活的 0–1 比率 | TensorBoard 不在维度里（`train.GetLcgUsedComputeResourceJobs` 才有），不过它一张卡都不占 |
-| 两把优先级刻度 | `task_dimensions[].priority` 是**提交值**，`resources usage` 的 `Reclaimable` 用它；`train.GetJob` 回的是平台内部**存储值**并另带 `priority_level` | 两者不是同一刻度，也没有公共换算合同；CLI 不做反查，`job status` 原样回显存储值并同时给出 `priority_level` |
-| 节点行的 GPU 数 | 嵌在 `gpu{total, used, available}` 里，不是扁平 `gpu_count`；公平调度透支时单节点的 `used` 也可能大于 `total`，甚至在 8 卡物理节点上报 16，`available` 因而可为负 | `max(total, used)>0` 可以补回零保障但正在使用的 GPU 节点，却不能拿 `used` 推物理规格；单机卡数只取 `total` / NodeSpecs。把 `available` 当物理空卡又会让节点表出现负数，`resources availability` 的整节点 `Idle GPUs` 只按完全空闲整节点乘 8 |
-| 任务关联容器 | Live `tasks_associated` 是 `{count, tasks:[{id, name, task_type, …}]}`，不是裸列表；兼容数据也可能在 `task_list` 给裸列表 | 直接判断字典真假会让 `{count:0, tasks:[]}` 永远算“有任务”，把真空闲节点全部隐藏 |
-| 「完全空闲」的判据 | `status=READY` + 任务关联 `count=0` + `gpu.used=0` + 无 `cordon_type` + 非 `is_maint` + `resource_pool != fault`，六项同时成立 | 少判一项就会把调度不上去或分配信息尚未收敛的节点算成空闲 |
-| 清退后的整节点 | NodeDimension 不带优先级；用 `tasks_associated.tasks[].id` 关联同 Workspace 的 `task_dimensions[].id`，只有节点上每个已声明任务都可见且提交优先级为低，才计入 `High Pri` | 混合高低优、缺 id、提交优先级为 0（未知）或两次 Live 快照间发生变化时都保守地不计入 |
-| `node_specs` 是规格目录不是节点清单 | 行是「形状 × 作业类型」的组合，还可能因 GiB 小数差异重复 | **任何按行数当节点数的读法都是错的**。`gpu_type` 恒空、`gpu_memory_size` 恒 0（真值在 `gpu_info` 里），discovery 声明的 `node_count` 线上不存在 |
-| `Get*NodeSpecs` 的 scoping 在顶层 | 套 `filter` 是 `unknown field`；只给组不给 workspace 是 `AccessForbidden` | 与维度族相反 |
-| 平台拼错的键 | 组资源汇总是 **`logic_resouces`**（少一个 `r`），`GetLogicComputeGroupResource` 与 `GetWorkspaceComputeResource` 同病。GPU 型号在 `gpu_type_stats[0].gpu_info.gpu_type_display` | — |
-| `logic_resouces.gpu_total` 不是硬件分类 | 它是当前 Workspace 在该组的 GPU 保障额度；公平调度可以出现 `gpu_total=0` 而 Live 使用量、型号与节点目录仍明确有 GPU，`gpu_total - gpu_used` 因而可以为负 | 不能靠 `gpu_total > 0` 识别 GPU 组，否则零保障组会被当成 CPU 并从默认 Availability 消失。Wrapper 综合 Live 使用量、`gpu_type_stats` 和 NodeDimension 分类；负余量原样保留，表示已超保障额度 |
-| `ListLogicComputeGroups` 的两个坑 | 标识字段叫 `logic_compute_group_id` 而不是 `id`；`support_job_type_list` 是 **JSON 编码的字符串**，不是数组 | 用 `isinstance(x, list)` 判断会把每个组都读成「没声明」，按 Workload 过滤计算组看起来生效、实际一个都没滤掉。取值域：`interactive_modeling` / `hpc_job` / `ray_job` / `distributed_training` / `tensorboard` / `inference_serving_customize` / `inference_serving_exclusive` |
-| 配额字段的结构 | `{资源}_{high\|low}_{running\|total}` 加可选 `_used`：高优先级（保障）和低优先级（可回收）是**两套独立的上限**，一个运行中的任务只吃其中一套。`-1` 表示不限 | 混着读会两边都报错。`GetWorkspaceQuota` / `GetWorkspaceComputeResource` 要顶层 `workspace_id`，套 `filter` 反而被拒 |
-| 配额与容量是两个问题 | **配额用完了可以被拒，即使机器闲着；机器忙满了也可以被拒，即使配额还有** | 两者都要看 |
-| 资源视图的命令内复用 | Availability 对各 Compute Group 的 `GetLogicComputeGroupResource` + `ListNodeDimension` 以 4 路有界并发读取，并在同一条命令内读取 TaskDimension 归类低优任务、NodeSpecs 展开规格，整节点列在 Availability 投影。Usage 单独读取 TaskDimension 做 Project/User/Task 投影。原始节点行、任务行和句柄只活在内部，公共投影不暴露 | 不复用时会把同一批 NodeDimension 重复读取并产生不同时间点的答案；持久缓存又会把实时余量冒充当前事实，所以复用范围只限本次命令 |
-| `ListProjectDimension` | 普通成员作用域可能成功返回空，即使同一 Workspace 的任务维度有真实数据，因此不能作为项目用量的权威来源 | 没有封装；按项目聚合改为在客户端折叠任务维度的行 |
+**Workspace & dimension notes:**
+- **Platform typo:** `GetLogicComputeGroupResource` and `GetWorkspaceComputeResource` spell the response key `logic_resouces` (missing the second `r`).
+- `ListLogicComputeGroups` uses `logic_compute_group_id` (not `id`) and returns `support_job_type_list` as a **JSON-encoded string** (`interactive_modeling`, `hpc_job`, `ray_job`, `distributed_training`, `tensorboard`, `inference_serving_customize`, `inference_serving_exclusive`).
+- `ListNodeDimension`, `ListTaskDimension`, and `ListUserDimension` require nested `filter.workspace_id`, default to 10 rows unless `page_size: 5000` is passed, and must be paginated until all `total` unique IDs are collected.
+- A physical 8-GPU node counts as `Free Nodes` only when all six conditions hold simultaneously: `status == "READY"`, `tasks_associated.count == 0`, `gpu.used == 0`, no `cordon_type`, not `is_maint`, and `resource_pool != "fault"`. It counts toward `High Pri Nodes` when every associated task in `TaskDimension` has a known low submission priority.
 
 ---
 
-### 8.7 `user` — 账号
+### 8.7 `user` — Account & API Keys
 
-| Action | 请求体 | 响应（`Result` 内） | CLI |
+| Action | Request Keys | Response (`Result`) | CLI Consumer |
 | --- | --- | --- | --- |
-| `GetUserDetail` | `{}` | `{id, name, name_en, email, avatar_url, global_role, created_at, extra_info{}}` | 所有「按当前用户过滤」的列表、`account check`、登录自举 |
-| `GetPermissions` † | `{WorkspaceId}` | `{permissions[]}`（如 `"job.trainingJob.create"`） | `account permissions` |
-| `GetRoutes` † | `{WorkspaceId}` | `{routes[{name, routes[{path, name, is_fair_workspace}]}]}` | Workspace 枚举、优先级选择、`init`、登录自举 |
-
-| 项 | 事实 |
-| --- | --- |
-| `GetUserDetail` 只覆盖当前用户 | 传空体返回当前账号；传 `user_id` / `id` / `UserId` 一律 `InvalidParameter` |
-| 当前用户身份在登录时已经读过 | 登录握手把完整 `GetUserDetail` 存进账号隔离的 `WebSession`；所有只需要 owner id 的列表直接复用，缺失时才 Live 回源并写回。`account check` 是例外：它显式强制 Live，用这次往返证明 Session 仍能被平台接受。共享慢账号上这会从每条列表命令稳定省掉一个串行请求 |
-| `userWorkspaceList` 是 Workspace 枚举的唯一来源 | 每个条目 `path` 是 `ws-…` id，`name` 是显示名，`is_fair_workspace` 是优先级选择器的唯一数据源，缺了就没法判断该工作空间用哪套优先级 |
-| 登录自举就用这两个 | `GetRoutes` 的 `WorkspaceId` 传字面量 `"default"` 网关照收并答完整的 `userWorkspaceList`；空串或省略才报 `WorkspaceId is required`。这正是登录握手时的处境：还一个 id 都不知道 |
-| 未封装 | `user.ListSSH`（账号级 SSH 公钥注册表，与 Notebook SSH 链路无关）、`user.GetMyPermissions`（见第 6 章）。`ListAPIKeys` 随 `user api-keys` 命令一起下线 |
+| `GetUserDetail` | `{}` | `{id, name, name_en, email, avatar_url, global_role, created_at, extra_info{}}` | Current-user filtering, `account check`, login bootstrap |
+| `GetPermissions` † | `{WorkspaceId}` | `{permissions[]}` | `account permissions` |
+| `GetRoutes` † | `{WorkspaceId}` | `{routes[{name, routes[{path, name, is_fair_workspace}]}]}` | Workspace enumeration (`WorkspaceId: "default"` during bootstrap) and `is_fair_workspace` detection |
+| `GetMyAPIList` | `{}` | `{items[{key_id, name, created_at, value}]}` (`value` stripped by wrapper) | `account api-key list` |
+| `GenerateAPIKey` | `{key_name}` | Verified by re-reading `GetMyAPIList` | `account api-key create` |
+| `GetAPIKeyPlaintext` | `{api_key_id}` | `{value}` (consumed only by explicit `export` / `run`) | `account api-key export`, `account api-key run` |
+| `DeleteAPIKey` | `{api_key_id}` | Verified by re-reading `GetMyAPIList` | `account api-key delete` |
 
 ---
 
-#### 推理 API Key 与 Serving Endpoint
+### 8.8 `project` — Projects
 
-控制台 Serving 详情页的「API 调用」与用户中心的 API Key 页面使用以下账号 Action，均由 [`browser_api/api_keys.py`](../../cli/inspire/platform/web/browser_api/api_keys.py) 封装。请求为 `POST /api/v2/user?Action=...`，沿用所选账号的 Web Session，响应经 `_v2_result()` 解包。它们与旧的 `ListAPIKeys` 不同。
-
-| Action | 请求体 | 响应 / CLI 合同 |
-| --- | --- | --- |
-| `GetMyAPIList` | `{}` | `items[{key_id,name,created_at,value}]`；wrapper 丢弃 `value`，默认列表只输出名称和时间；`account api-key list` |
-| `GenerateAPIKey` | `{key_name}` | 不依赖创建返回值，成功后列表读回；`account api-key create` |
-| `GetAPIKeyPlaintext` | `{api_key_id}` | `value` 为密钥明文，仅显式 `account api-key export/run` 消费；默认输出与 JSON 不含值，只有 `export --stdout` 显式输出明文 |
-| `DeleteAPIKey` | `{api_key_id}` | 成功后列表确认对应句柄消失；`account api-key delete` |
-
-接口错误不转发原始消息，以免服务器回显密钥。SDK 的 API-key 创建若已发送但无法确认，保留 `SubmissionUncertainError.operation_id`，以统一的本地消息提示先检查 API keys；服务器原文和异常链仍不外露。其他 API-key 错误及 CLI 原有提示保持不变。列表的 `value` 即使是明文也会被丢弃，不能依赖服务端始终返回掩码；列表结构异常报错，不能降级为空列表。CLI 名称接受 1–256 个字母、数字、下划线、短横线或点；同名对象通过可读候选与 `--pick` 消歧，`key_id` 只在内部解析和请求中使用。账号由既有全局 `--account` 机制选择，不额外传 Workspace 或 Serving ID；这不构成“密钥只对某个 Serving 有权限”的保证。
-
-创建和删除提交成功后分别通过列表确认名称出现、所选句柄消失；确认读取失败时，输出明确的 confirmation pending 状态，不报成提交失败。文件导出先拒绝既有路径，再在目标目录创建空临时文件：POSIX 校验实际权限 `0600`；Windows 通过 PowerShell 设置不继承、仅当前用户 FullControl 的 ACL，读回核验后才写入秘密。PowerShell 参数和脚本仅接收空文件路径，不传密钥；Security 模块从该引擎的 `$PSHOME` 显式加载，避免 PowerShell 7 → Python → Windows PowerShell 5.1 的模块路径继承导致版本冲突。格式化内容写入后 fsync，最后以硬链接原子发布，清理临时文件；既有文件、符号链接或发布期间出现的同名路径不会被覆盖。Windows 缺少 PowerShell 时在获取明文前失败；权限或硬链接不受支持时不降级为公开文件。
-
-`export` 必须选择 `--output` 或 `--stdout` 之一，支持 raw、dotenv、sh、powershell 四种格式和 `--env-name`；dotenv 限定可移植的未引用 token，shell 格式按各自规则引用。仅显式 `--stdout` 可输出明文，不能组合 `--json`。`run NAME -- COMMAND...` 将明文放入子进程环境，使用参数数组启动而不经过 shell，传播退出码，不修改父进程环境，不支持 `--json`。这是显式秘密出口，不能让普通 JSON 清洗例外隐式放行 key value。
-
-网页 API Key 创建弹窗的权限说明为“可通过 API Key 访问推理服务和应用”，只包含名称输入，没有权限范围选择器。AccessKey 与 SSH 公钥为独立用户中心入口；AccessKey 表头包含所属项目和 BucketName。当前只确认推理服务 Bearer 调用合同，应用的独立协议仍未确认，不将该密钥推广为所有 Browser API 的认证凭据。
-
-[`test_serving_api_access.py`](../../cli/tests/test_serving_api_access.py) 覆盖请求合同、值清洗、名称歧义、Header/URL 校验和导出竞争；[`test_api_key_export_formats.py`](../../cli/tests/test_api_key_export_formats.py) 覆盖显式 stdout、格式转义、子进程环境、Windows ACL 失败清理与原生 PowerShell 行为；[`test_serving_commands.py`](../../cli/tests/test_serving_commands.py) 覆盖状态输出及创建后读取失败。验证密钥生命周期时使用独立临时 Key，并在删除后读回确认；不要以成功信封或 HEAD 状态码代替实际模型推理验收。
-
-Serving 调用页直接使用 `GetServing.extra_info.service`，列表行同样包含该值。公开输出只放行经过验证的 HTTP(S) origin；含 userinfo、query、fragment、未知路径或非法主机的地址不输出。JSON 在这些命令中显式保留 `endpoint`，其他调用仍按默认规则剔除该字段。生成示例中的 `example` 和已派生的 `base_url` 有同样的局部保留例外。
-
-`INF_API_KEY` 是客户端环境变量，鉴权为 Bearer；`x-inspire-inference-key` 是亲和性 Hash Header。CUSTOM 不追加固定业务路径，也不自动宣称兼容 OpenAI；EXCLUSIVE / SERVERLESS 按控制台示例派生 `/v1` 和 chat completions。Header 值拒绝控制字符并使用 shell quoting，生成示例不调用推理服务。
-
-### 8.8 `project` — 项目
-
-| Action | 请求体 | 响应（`Result` 内） | CLI |
+| Action | Request Keys | Response (`Result`) | CLI Consumer |
 | --- | --- | --- | --- |
-| `ListProjects` † | `{page, page_size, filter:{workspace_id?, check_admin?}}` | `{items[], total}` | `project list`、每个 create 的项目解析、`init` |
+| `ListProjects` † | `{page, page_size, filter:{workspace_id?, check_admin?}}` | `{items[], total}` | `project list`, project resolution |
 | `GetProjectDetail` † | `{ProjectId}` | `{budget, children_budget, remain_budget, used_budget, created_at, en_name, description, priority, owner…}` | `project detail` |
 | `GetProjectOwners` † | `{}` | `{items[{id, name, login_name, …}]}` | `project owners` |
 | `GetProjectForPage` | `{page, page_size, filter{}}` | `{items[], total}` | — |
 
-| 项 | 事实 |
-| --- | --- |
-| 两个列表条数不同是设计如此 | `ListProjects` 是选择器的行集，`GetProjectForPage` 是项目管理页的行集，后者会滤掉用户已退出或已结束的项目。**不要读成「谁坏了」** |
-| `GetProjectDetail` 的跳动字段 | `remain_budget` / `used_budget` / `resource` 本来就在跳，连着读两次不相等是正常的 |
-| 翻页策略 | CLI 侧固定 `page_size = 100` 直到 `len(items) >= total` 或短页；选择器路径用 `page_size: -1` 一次取全 |
-| 对调度有意义的字段 | `gpu_limit`（是否有项目级 GPU-hour 上限）、`priority_name`（数字字符串）、`space_list[]`（项目跨哪些 Workspace） |
-
 ---
 
-### 8.9 `image` — 镜像
+### 8.9 `image` — Image Catalog
 
-Referer：`/jobs/interactiveModeling`。
+Referer: `/jobs/interactiveModeling`.
 
-| Action | 请求体 | 响应（`Result` 内） | CLI |
+| Action | Request Keys | Response (`Result`) | CLI Consumer |
 | --- | --- | --- | --- |
-| `ListImages` | `{page: 0, page_size: -1, filter:{…见下…}}` | `{images[], total}` | `image list`、各 create 的镜像解析、`cache refresh` |
-| `GetImageById` | `{ImageId}` | `image_id` / `name` / `address` / `framework` / `version` / `source` / `visibility` / `status` / `description` / `created_at` | `image detail`、`notebook save-image` 的就绪轮询 |
-| `CreateImage` † | `{name, version, registry_hint:{workspace_id}, visibility, add_method, description}` | `{image{image_id, …}}` | `image register` |
-| `UpdateImage` † | `{id, visibility?, description?}` | — | `image set-visibility` |
+| `ListImages` | `{page: 0, page_size: -1, filter:{…}}` | `{images[], total}` | `image list`, image resolution, `cache refresh` |
+| `GetImageById` | `{ImageId}` | `image_id`, `name`, `address`, `framework`, `version`, `source`, `visibility`, `status`, `description`, `created_at` | `image detail`, readiness polling |
+| `CreateImage` † | `{name, version, registry_hint:{workspace_id}, visibility, add_method, description}` | `{image{image_id, …}}` | `image register` (`add_method: 0` for `docker push`) |
+| `UpdateImage` † | `{id, visibility?, description?}` | — | `image set-visibility` (requires bare `id`, not `image_id`) |
 | `DeleteImage` | `{image_id}` | — | `image delete` |
 
-| 项 | 事实 | 后果 |
-| --- | --- | --- |
-| `UpdateImage` 的目标键是裸 `id` | 不是大小写问题——`image_id` 是**另一个字段名**，不会被归一化成 `id` | 传错不报 `unknown field`：**默默忽略**，然后拿空 id 去查库，回 `InternalError: 数据库错误, 请联系管理员`。**看到这个错先检查字段名** |
-| `ListImages` 的三种来源用三种 filter | 官方：`{source: "SOURCE_OFFICIAL", source_list: [], registry_hint:{workspace_id}}`；公开：`{source_list: ["SOURCE_PRIVATE","SOURCE_PUBLIC"], visibility: "VISIBILITY_PUBLIC", registry_hint:{…}}`；个人可见：同上但 `VISIBILITY_PRIVATE` | 不是一个简单的 `source` 字段 |
-| 镜像地址在 `address` | 不是 `url`。创建 Workload 时平台匹配的是**注册表 URL 而不是可见名** | 发名字会被拒为 `无法找到对应镜像` |
-| `add_method` | `0` = 本地推送（`docker push`，网关直接拒 `no image uploaded`），`2` = 注册已有镜像地址 | — |
-| 就绪状态有两套 | `image register` 产出的走 `READY`，`notebook save-image` 产出的走 `SUCCESS`。终态失败：`FAILED` / `FAILURE` / `ERROR` / `CANCELLED` / `TIMEOUT` / `ABORTED` / `INTERRUPTED` | 漏掉任何一个都会让轮询挂到超时而不是快速失败 |
-| 目录按 Registry 组织 | `registry_hint: {workspace_id}` 指的是一个 Registry，多个 Workspace 正常共用同一份目录 | 按 Workspace 各读一遍是重复下载；用行里的 `registry_id` 判组 |
-| 四种来源彼此独立 | official / public / project / private 各是一条完整 `ListImages`；`image list --source all` 同时读取，再按这个稳定顺序合并。单档失败只产生该档 warning | 串行读取会把四条目录延迟直接相加；并发不改变任何请求体或空结果语义 |
-
-「把 Notebook 存成镜像」不在这条路由，在 `notebook.SaveNotebookImage`；`image` 组只管已经存在的镜像。
-
 ---
 
-### 8.10 `model-hub` — 模型仓库
+### 8.10 `model-hub` — Model Registry
 
-Referer：`/jobs/modelService?spaceId={workspace_id}`。路由名是**连字符**形式。
+Referer: `/jobs/modelService?spaceId={workspace_id}`. Route uses a **hyphen** (`model-hub`).
 
-| Action | 请求体 | 响应（`Result` 内） | CLI |
+| Action | Request Keys | Response (`Result`) | CLI Consumer |
 | --- | --- | --- | --- |
-| `ListModels` | `{workspace_id, page, page_size, filter_by:{user_id, keyword?, project_id[]?, model_type[]?}}` | `{list[], total}` | `model list`、`serving create` 的模型解析 |
+| `ListModels` | `{workspace_id, page, page_size, filter_by:{user_id, keyword?, project_id[]?, model_type[]?}}` | `{list[], total}` | `model list`, `serving create` model resolution |
 | `GetModelDetail` | `{model_id}` | `{model{}, user_name, project_name, user_avatar}` | `model status` |
-| `ListModelVersions` | `{model_id}` | `{list[], total, next_version}` | `model versions`、`model status` |
-| `ListModelVersionOptions` | `{model_id}` | `{list[], total}` | — |
-| `ListModelCreators` | `{project_id}` | `{list[]\|items[], total}` | — |
-| `ListModelRelatedServings` | `{model_id, version, page, page_size}` | `{serving[], total}` | `model status` |
-| `GetHasModelPendingServing` | `{model_id, version?}` | `{has_pending_serving}` | `model status` |
-| `GetModelPublishPrefill` | `{model_id, version}` | `{model_info{}, technical_specs{}, integration_info{}}` | — |
-| `GetModelPublishStatus` | `{model_id, version}` | `{status, publish_reject_detail, has_published}` | — |
+| `ListModelVersions` | `{model_id}` | `{list[], total, next_version}` | `model versions`, `model status` |
+| `ListModelRelatedServings` | `{model_id, version, page, page_size}` | `{serving[], total}` | `model status` / `model delete` precheck |
+| `GetHasModelPendingServing` | `{model_id, version?}` | `{has_pending_serving}` | `model status` / `model delete` precheck |
 | `GetRecommendedConfig` | `{model_id, version}` | `{min_node_count, min_gpu_count_per_node, min_cpu_count_per_node, min_memory_size_gib_per_node}` | `model deploy-config` |
 | `CheckModelVLLMCompatible` | `{model_id, version, inference_serving_type}` | `{is_vllm_compatible}` | `model deploy-config` |
-| `GetModelVLLMCompatibleData` | `{model_id, inference_serving_type?}` | `{data:[{version, is_vllm_compatible}]}` | `model status`、`model versions` |
-| `CreateModel` † | `{name, project_id, workspace_id, model_source_path, model_source_type, model_type[], tags[], description}` | `{model_id}` | `model register` |
+| `GetModelVLLMCompatibleData` | `{model_id, inference_serving_type?}` | `{data:[{version, is_vllm_compatible}]}` | `model status`, `model versions` |
+| `CreateModel` † | `{name, project_id, workspace_id, model_source_path, model_source_type, model_type[], tags[], description}` | `{model_id}` | `model register` (`model_source_type: 1`) |
 | `DeleteModel` † | `{model_id}` | — | `model delete` |
 
-| 项 | 事实 | 后果 |
-| --- | --- | --- |
-| 两个近似名字极易接反 | `ListModelVersions` 多一个 `next_version`，是详情抽屉用的**富**视图（含模型路径、源路径、大小、发布状态、运行中的 serving 数）；`ListModelVersionOptions` 是部署表单用的**精简**版本列表 | 只能靠响应字段区分 |
-| `ListModels` 不收 `page_size: -1` | 答 `InvalidParameter: page or page_size invalid`，要按 `total` 翻页 | 「-1 表示全要」在 `ListImages` / `ListLogicComputeGroups` / `ListProjects` 上成立，这里不成立 |
-| `ListModelVersions` 不接受 `page` | `ListModelCreators` 接受 `project_id` | — |
-| `GetRecommendedConfig` 给的是下限 | 四个 `min_*` 映射到 `serving create --quota gpu,cpu,mem` 和 `--nodes-per-replica` | 照抄不等于最优 |
-| 版本记录里的 `is_vllm_compatible` 是死字段 | 存量记录与两个 Live 兼容性 Action 的结果不一致 | 读存量字段会把兼容版本误报成不兼容。**vLLM 兼容性只能问 live**：`GetModelVLLMCompatibleData` 一次回答某模型所有版本，`CheckModelVLLMCompatible` 按版本问 |
-| 嵌套形状 | `ListModelVersions` 的元素是 `{model: {...}, running_infrence_serving}`（平台把 inference 拼错了），版本号与规格都在内层；列表项是 `{model: {...}, project_name, user_name, latest_version}`，扁平化时 `model_id` 优先于内层 `id` | — |
-| `ListModelRelatedServings` | `page` 与 `page_size` 都必填（`-1` 被拒），`version` 也实质必填——省略时 proto 默认 0，返回空列表而不是「所有版本」 | 条目的 `version` 是**推理服务自己的版本号**，不是模型版本，印出来会被误读；`status` 是 int（`4` = RUNNING） |
-| `GetHasModelPendingServing` | `version` 可选，省略即问整个模型；只在有 PENDING 部署时为 true（DEPLOYING、RUNNING 都是 false） | 正好补上 `running_infrence_serving` 计数为 0 却已有部署排队的盲区 |
-| `CreateModel` 的路径约束 | `model_source_path` 必须落在所给 workspace + project 的路径下，`global_user` 路径被 `存储路径格式不正确` 拒掉。`model_source_type = 1` 对应 UI 的「路径注册」流程，首个版本号由后端推断 | — |
-| `filter_by.project_id` 必须是数组 | 传裸字符串会被 protobuf 解码拒绝 | — |
-| `UpdateModel` | 存在但未封装 | — |
+*(Note: `ListModelVersions` elements spell the active serving count `running_infrence_serving` and carry a dead `is_vllm_compatible` field; always query `GetModelVLLMCompatibleData` or `CheckModelVLLMCompatible` for live vLLM compatibility.)*
 
 ---
 
-### 8.11 `resource-price` — 配额目录 ‡
+### 8.11 `resource-price` — Quota Catalog ‡
 
-Referer：`/jobs/interactiveModeling`。**整条路由不在 discovery 里**，控制台一直在用。它挡在每一个 `create` 命令前面：把用户敲的 `-q 1,20,200` 翻成平台要的 `quota_id`，是这个翻译的唯一来源。
+Referer: `/jobs/interactiveModeling`. Resolves `-q gpu,cpu,mem` into `quota_id` and `resource_spec_price`:
 
-| Action | 请求体 | 响应（`Result` 内） | CLI |
+| Action | Request Keys | Response (`Result`) | CLI Consumer |
 | --- | --- | --- | --- |
-| `GetLogicComputeGroupResourceSpecPrices` | `{workspace_id, logic_compute_group_id, schedule_config_type}` | `{lcg_resource_spec_prices[{quota_id, gpu_count, cpu_count, memory_size_gib, gpu_info{gpu_type, gpu_type_display, brand, gpu_memory_size_gb}, cpu_info{cpu_type}, total_price_per_hour, gpu_price, cpu_price, memory_price}]}` | `<workload> quota`、每个 create 的配额解析 |
+| `GetLogicComputeGroupResourceSpecPrices` | `{workspace_id, logic_compute_group_id, schedule_config_type}` | `{lcg_resource_spec_prices[{quota_id, gpu_count, cpu_count, memory_size_gib, gpu_info{}, cpu_info{}, total_price_per_hour, …}]}` | `<workload> quota`, `create` quota resolution |
 
-| 项 | 事实 |
-| --- | --- |
-| `schedule_config_type` | `SCHEDULE_CONFIG_TYPE_` 加 `DSW`（Notebook）/ `TRAIN` / `HPC` / `RAY_JOB` / `SERVE`；另有 `SERVE_DYNAMIC` 对应 Serverless，CLI 不用 |
-| 两个字段都必填 | 少 `schedule_config_type` 答 `unspecified schedule config type`，少 `logic_compute_group_id` 答 `Logic compute group id should not be empty`。**没有工作空间级的形态** |
-| 它的价值是「已经按计算组解析好」 | `notebook.GetScheduleConfig` 的 `*_quota` 菜单是工作空间级的整张表，要自己按 `logic_compute_group_ids` 过滤，还要再叠「装得进组内某个节点」和「组真的有可分配容量」两条规则；这个 Action 直接给该组当下真正可用的那几行。两边的 `quota_id` 一一对应，用来 join `allowed_priority_levels` |
-| `total_price_per_hour` 单位 | 点券/小时，是目标 Workspace / Compute Group 当前返回的 Live 单价，不能在客户端硬编码。同族的 `GetResourceAndInferencePrices` 与 `GetStoragePrices`（点券/TB/天）也可读，CLI 不接 |
-| **空列表是权威回答** | 该组不支持这类 Workload 时就是 0 行。请求失败要抛，两者**不能同值**；否则限流或服务故障会被缓存成「没有配额」 |
+`schedule_config_type` takes `SCHEDULE_CONFIG_TYPE_` + `DSW` (Notebook), `TRAIN` (Job), `HPC`, `RAY_JOB`, or `SERVE`. Joined against `notebook.GetScheduleConfig` by `quota_id` to attach `allowed_priority_levels`.
 
 ---
 
-### 8.12 `file` — 文件页 ‡
+### 8.12 `file` — Storage Discovery ‡
 
-Referer：`/jobs/files?spaceId={workspace_id}`（`GetSftpgoConnectionInfo` 在用户中心页下）。**整条路由不在 discovery 里**（历史上出现过又被删掉），但活着。
+Referer: `/jobs/files?spaceId={workspace_id}`.
 
-| Action | 请求体 | 响应（`Result` 内） | CLI |
+| Action | Request Keys | Response (`Result`) | Status |
 | --- | --- | --- | --- |
-| `GetSystemStorageTypeList` | `{filter:{workspace_id}}` | `{system_storages[{name, cluster_id}]}` | 当前 CLI 无消费者 |
-| `GetDirList` | `{filter:{workspace_id, system_storage_type, name, cluster_id?}}` | `{files[{directory}]}` | 同上，逐存储池列项目目录 |
-| `GetSftpgoConnectionInfo` † | `{storage_name}`（小写池名，可选 `usage`） | `{address, webdav_port, auth}` ⚠️ **`auth` 是明文凭据** | — |
-| `ListFileCopyTasks` † | `{page, page_size}` | `{items, total}` | — |
-
-| 项 | 事实 |
-| --- | --- |
-| `filter.name` 是前端的类别键 | 不是文件名：`project` / `global_public` / `global_user` |
-| `system_storage_type` | 取 `GetSystemStorageTypeList` 返回的存储池名；`share-` 前缀的池在项目目录发现里被跳过 |
-| 行顺序不稳定 | 存储池和目录列表都可能换序。当前调用方都不依赖顺序，**新调用方也不要依赖** |
-
-**`GetSftpgoConnectionInfo` 是一条不需要计算资源的共享盘读写通道。** `{storage_name}` 取池名**转小写**（`hdd` / `ssd` / `qb-ilm` / `share-*`；不认 `workspace_id` 也不认 `filter`）。名字里的 sftpgo 有误导性——sftpgo 同时提供 WebDAV，控制台走的就是 WebDAV。
-
-- **`auth` 是 base64 的 `用户名:密码`，一对可以直接用的明文凭据。** 必须和 Notebook 代理地址的 token 同等对待：不进日志、不进报错、不进 `--json`、不进任何文档。本页只记形状。
-- `https://{address}:{webdav_port}` 是读写 WebDAV 服务，根目录映射容器里的 `/inspire/<池>/…` 命名空间；协议使用 `PROPFIND` / `PUT` / `GET` / `DELETE`。
-- **它不需要任何工作负载在跑。** CLI 刻意不封装该端点：它会把可直接使用的明文凭据带入新的公共输出边界；现有文件流转继续使用 `notebook scp`。
-
-**`CreateCopy` 不是复制，是一张要审批的申请。** 控制台里叫「新建数据传输」，表单只有 `source_path` / `target_path` / `overwrite`，提交按钮写的是「提交审批」——它和 `audit` 服务是一条链，不是即时的服务端 `cp`。同族的 `WithdrawFileCopyTask` / `DeleteFileCopyTask` 都只收 `{task_id}`。CLI 不支持这条审批工作流，因此也不封装只服务于该流程的用户级 `ListFileCopyTasks`。
+| `GetSystemStorageTypeList` | `{filter:{workspace_id}}` | `{system_storages[{name, cluster_id}]}` | Wrapped, no active CLI consumer |
+| `GetDirList` | `{filter:{workspace_id, system_storage_type, name, cluster_id?}}` | `{files[{directory}]}` | Wrapped, no active CLI consumer |
+| `GetSftpgoConnectionInfo` † | `{storage_name}` | `{address, webdav_port, auth}` | **Intentionally not wrapped** (`auth` is a plaintext base64 `user:password` credential for WebDAV) |
+| `CreateCopy` / `ListFileCopyTasks` † | — | — | **Intentionally not wrapped** (submits human-reviewed approval tickets rather than immediate file copies) |
 
 ---
 
-### 8.13 `dataset` — 官方数据集挂载 ‡
+### 8.13 `dataset` — Dataset Mount Validation ‡
 
-Referer：`/jobs/interactiveModeling?spaceId={workspace_id}`。**整条路由不在 discovery 里**；当前 CLI 只使用 `ValidateDataset`。
+Referer: `/jobs/interactiveModeling?spaceId={workspace_id}`.
 
-| Action | 请求体 | 响应（`Result` 内） | CLI |
+| Action | Request Keys | Response (`Result`) | CLI Consumer |
 | --- | --- | --- | --- |
-| `ValidateDataset` | `{datasets:[{dataset_id, version_id}], workspace_id}` | `{datasets_result:[{dataset_id, version_id, success, path, error_message}]}` | `dataset validate`、`notebook/job/hpc create --dataset` |
+| `ValidateDataset` | `{datasets:[{dataset_id, version_id}], workspace_id}` | `{datasets_result:[{dataset_id, version_id, success, path, error_message}]}` | `dataset validate`, `notebook`/`job`/`hpc create --dataset` |
 
-| 项 | 事实 |
-| --- | --- |
-| 两个 id 都是 code，不是数字主键 | `dataset_id` 是数据集 code、`version_id` 是版本 code。`pixabay-81k` + `v0` 解析成功；同一数据集的数字 id 回 `数据集不存在`。数字主键只活在数据广场内部（第 11 章） |
-| 错误码 | `2000 数据集不存在`、`2001 版本不存在`、`2005 无访问权限` |
-| 返回的 `path` 是平台内部存储路径 | 如 `sftpgo/pixabay-81k/v0`，不是容器内挂载点。它要原样填进 create 请求的 `dataset_info[].path`——所以**创建前必须先走一次 `ValidateDataset`**，这正是控制台「校验数据」按钮做的事 |
-| 容器内挂载点 | 固定 `/inspire/dataset/<数据集 code>/<版本 code>`，只读。CLI 只投影两个 code 和这个容器路径，平台存储路径不进公共输出 |
-| 批量顺序 | 整批走一次请求，平台回的顺序**不保证**与请求一致，按 `(dataset, version)` 键回请求，**不要 zip** |
-| 检索不在这条路由上 | 也不在这个平台上，见第 11 章 |
+Both `dataset_id` and `version_id` take **string codes** (e.g., `"pixabay-81k"` and `"v0"`), never numeric Dataset Hub IDs. Error codes: `2000 数据集不存在`, `2001 版本不存在`, `2005 无访问权限`. Returned `path` is the internal storage path passed into `dataset_info[].path` on creation; the container mount point is always `/inspire/dataset/<dataset_code>/<version_code>`. Match batch results by `(dataset_id, version_id)` key, not list order.
 
 ---
 
 ### 8.14 Metrics — `GetTaskMetric`
 
-**没有集群级端点**：每个 service 各有一份 `GetTaskMetric`，请求体逐字相同。
+Called per service route (`POST /api/v2/{notebook|train|hpc|ray|inference_serving}?Action=GetTaskMetric`):
 
 ```jsonc
-POST /api/v2/{notebook|train|hpc|ray|inference_serving}?Action=GetTaskMetric
 {
   "filter": {"logic_compute_group_id": "lcg-…", "task_id": "…", "task_type": "…"},
   "metric_types": ["gpu_usage_rate"],
   "time_range": {"start_timestamp": 1700000000, "end_timestamp": 1700003600, "interval_second": 60}
 }
-→ Result: {"time_seris_metric_groups": [{group_name, metric_type, resource_name, time_series:[{timestamp, data}]}]}
 ```
 
-| CLI 资源名 | `task_type` | 路由 |
-| --- | --- | --- |
-| `notebook` | `interactive_modeling` | `notebook` |
-| `job` | `distributed_training` | `train` |
-| `hpc` | `hpc_job` | `hpc` |
-| `ray` | `ray_job` | `ray` |
-| `serving` | `inference_serving` | `inference_serving` |
-
-| 项 | 事实 |
-| --- | --- |
-| **一次只能问一个 metric** | 一个请求里放 5 个 `metric_types` 只返回第一个的数据，所以 Wrapper 按 metric 扇出再合并；任何一个失败整次调用抛错 |
-| 响应键是平台拼错的 | `time_seris_metric_groups`（少一个 `e`）。Wrapper 同时接受拼对的写法，以防平台哪天修正 |
-| 8 个 metric_type | `gpu_usage_rate`、`gpu_memory_usage_rate`、`cpu_usage_rate`、`memory_usage_rate`、`disk_io_read`、`disk_io_write`、`network_tcp_ip_io_read`、`network_tcp_ip_io_write`。`*_usage_rate` 是 0–1 比率，I/O 是字节/秒 |
-| 间隔选项 | `1m` = 60、`5m` = 300、`30m` = 1800、`1h` = 3600 秒 |
-| 不支持的 `task_type` | 会拿到一个 Prometheus 422（抱怨空 label name），Wrapper 在发出前就校验 |
-| 分组 | 多 pod 实例（分布式训练、多副本 serving）每个 pod 一个 group；单实例 Notebook 恰好一个 |
-| 没有对应物的那个 | `workspace.GetOverviewResourceMetricByTime` **不是**它的对应物：那是工作空间级总览，对普通成员 `AccessForbidden`。第 5 章的「用 `workspace.*` 不用 `cluster.*`」只适用于两边同名的那 8 个 Action |
-
-#### `GetTaskMetricBatch` 为什么不用
-
-同样五个路由上都有一个 `GetTaskMetricBatch`，请求体是 `{task_ids, metric_types, time_range}`（不收 `filter` / `logic_compute_group_id`，传了报 proto unknown field）。它**答的不是同一份数据**，不能当作上面那条的批量形态。
-
-响应形状先不一样：`Result.task_metrics[] {task_id, time_series_metric_groups[]}`，多包一层且这里的键拼**对**了。按单数版的顶层 `time_seris_metric_groups` 去读会读出空，于是它看起来像「没数据」而不是「坏了」。
-
-语义也不同：GPU / 显存 / CPU / 内存使用率缺少 `group_name`，多 Pod 任务无法逐 Pod 拆分，且时间点的聚合值与单数端点不一致；磁盘 I/O 返回空样本，网络 I/O 返回 `InternalError`。控制台不使用这个 Action。它不是单数版的等价批量入口，CLI 继续逐指标调用 `GetTaskMetric`，保留与控制台一致的曲线、分组和失败语义。
-
-### 8.15 批量读 — `ListJobs` / `ListJobEvents` 的复数形态
-
-`train` 与 `hpc` 各有两个 Action 接受 id 列表。两条限制与失败形态不对称，照着一条的直觉写另一条会出事。
-
-```jsonc
-POST /api/v2/{train|hpc}?Action=ListJobs
-{"workspace_id": "ws-…", "job_ids": ["job-a", "job-b"]}      // ≤ 20
-
-POST /api/v2/{train|hpc}?Action=ListJobEvents
-{"page_num": 1, "page_size": 200,                             // hpc 要 pageNum/pageSize
- "filter": {"object_type": "job", "object_ids": ["job-a"]}}   // hpc 是 "HPC_JOB"，≤ 20
-```
-
-| 项 | 事实 | 读错的后果 |
-| --- | --- | --- |
-| `ListJobs` 的记录 | `train` 的批量记录与 `GetJob` 使用同一详情投影；`hpc` 只依赖已建模的列表字段，不把未声明字段当作详情合同 | `train` 不必补一次详情请求；`hpc` 调用方不得假设批量行与 `GetJob` 逐字段等价 |
-| 上限 20 | `job_ids count exceeds limit 20` / `object_ids count exceeds limit 20`，**按列表长度计数**，20 个不重复 + 1 个重复 = 21 也被拒 | 先去重再分片；分片后去重仍然会撞上限 |
-| `object_type: "instance"` **不受这个上限** | 它使用独立的实例事件分片边界 | `list_job_instance_events` 保持按 200 分片，不要跟着改成 20 |
-| `ListJobs` 找不到 id | **静默丢弃**，`total` 只反映命中数 | 缺失只能由调用方拿请求 diff 出来；短列表不等于「就这些」 |
-| `ListJobEvents` 找不到 id | **整个请求失败**：`InvalidParameter: job <id> not found`，train 与 hpc 都是 | 一个被 GC 的任务会带走同批另外 19 个的事件；必须剔掉报错点名的 id 重试 |
-| `workspace_id` | `job_ids` 存在时必填，否则 `workspace_id is required when job_ids is set` | **Workspace 传错会静默返回 0**，与「任务不存在」不可区分 |
-| `job_ids: []` | 掉回分页路径并报 `page or page_size too large` | 空列表必须短路，不能发出去 |
-| 返回顺序 | 不是入参顺序 | 按 id 建索引，不要跟请求 zip |
-| 事件可加性 | 批量结果每行带 `object_id`，可按任务拆回 | 不要依赖返回顺序或与请求列表 zip |
-| 事件分页 | `total` 覆盖整批查询，按它继续翻页 | — |
-
-### 8.16 `job.ListJobs` — 跨 workload 的批量状态（**未接入**）
-
-`/api/v2/job` 这个路由在 discovery 里没有，控制台的 `schedulingService` chunk 里有（`a.GET_JOBS`）。它一次可以问**多种 workload 类型**的状态：
-
-```jsonc
-POST /api/v2/job?Action=ListJobs
-{"filter": {"train_job_ids": [...], "notebook_job_ids": [...], "slurm_job_ids": [...]}}
-→ Result.jobs[] {task_id, task_name, task_type, <类型专属状态字段>, project, creator, worksapce_id}
-```
-
-| task_type | 入参键 | 状态字段 |
-| --- | --- | --- |
-| `distributed_training` | `train_job_ids` | `train_status` |
-| `interactive_modeling` | `notebook_job_ids` | `notebook_status` |
-| `hpc_job` | `slurm_job_ids` | `slurm_job_status` |
-| `ray_job` | `ray_job_ids` | `ray_job_status` |
-| `tensorboard` | `tensorboard_job_ids` | `tensorboard_status` |
-| `model_serving` / `inference_serving_customize` | `inference_serving_job_ids` | `model_serving_status` / `inference_serving_status` |
-| `sandbox` | `sandbox_ids` | `sandbox_status` |
-
-与 8.15 那两条相比：**不需要 `workspace_id`**、未知 id 静默丢弃且不报错，也不使用 20 条分片合同，服务端会自行去重。代价是记录很瘦——只有状态、项目、创建者，没有配额、节点、命令。响应里的 `worksapce_id` 是平台的拼写错误，要照抄。
-
-**目前没有接入**：CLI 的每条状态命令都是按 workload 分组的，瘦记录填不满 `job status` 的输出，而没有消费者的 Wrapper 就是死代码。要做「一条命令看完所有在跑的东西」时，从这里开始。
+- `task_type` values: `interactive_modeling` (`notebook`), `distributed_training` (`job`), `hpc_job` (`hpc`), `ray_job` (`ray`), `inference_serving` (`serving`).
+- **One metric per request:** Passing multiple `metric_types` only returns the first metric, so the wrapper fans out per metric (`gpu_usage_rate`, `gpu_memory_usage_rate`, `cpu_usage_rate`, `memory_usage_rate`, `disk_io_read`, `disk_io_write`, `network_tcp_ip_io_read`, `network_tcp_ip_io_write`).
+- **Platform typo:** Response key is spelled `time_seris_metric_groups` (wrapper also accepts `time_series_metric_groups`).
+- **Do not use `GetTaskMetricBatch`:** It drops per-Pod `group_name` labels, returns empty disk I/O and `InternalError` on network I/O, and disagrees with single-task aggregation values.
 
 ---
 
-## 9. 创建面的字段合同
+### 8.15 Batch Reads — `ListJobs` & `ListJobEvents`
 
-五个创建 Action 接受的字段互不相同，且只有 `notebook.CreateNotebook`、`train.CreateJob`、`ray.CreateJob` 在 discovery 里声明过。下表用[字段存在性探针](#7-探针方法)逐字段量出来，**是判断某个网页选项能不能进 CLI 的唯一依据**。
+`train` and `hpc` support batch ID queries up to **20 IDs per request** (deduplicate before chunking):
+- `ListJobs` with `{workspace_id, job_ids: [...]}` silently drops unknown IDs (diff against requested IDs to find missing jobs).
+- `ListJobEvents` with `filter: {object_type, object_ids: [...]}` fails the **entire batch** (`InvalidParameter: job <id> not found`) if any single ID is missing; strip the offending ID and retry the remaining batch. (Pod-level `object_type: "instance"` events use a separate 200-item chunk limit.)
 
-| 字段 | notebook | train Console | hpc Console | ray | serving Console |
+---
+
+## 9. Creation Payload Contracts
+
+| Field | `notebook.CreateNotebook` | `train.CreateJobConsole` † | `hpc.CreateJobConsole` † | `ray.CreateJob` | `inference_serving.CreateServingConsole` † |
 | --- | --- | --- | --- | --- | --- |
-| `dataset_info` | 接受 | 接受 | 接受 | **拒绝** | **拒绝** |
-| `envs` | **拒绝** | 接受 | **拒绝** | **拒绝** | **拒绝** |
-| `description` | **拒绝** | 接受 | 接受 | 接受 | 接受 |
-| `mounts` / `mount_path` | 接受 | 接受 | **拒绝** | **拒绝** | 接受（`custom_mounts`） |
-| `is_publicpath_readonly` | 接受 | 接受 | 接受 | 接受 | 接受 |
-| `is_projectuserspath_readonly` | 接受 | **拒绝** | **拒绝** | — | — |
-| `queue_id` | 接受 | 接受 | 接受 | **拒绝** | **拒绝** |
-| `runtime_attributes` | 接受 | 接受 | 接受 | 接受 | 接受 |
+| `dataset_info` | Accepted | Accepted | Accepted | **Rejected** | **Rejected** |
+| `envs` (`[{name, value}]`) | **Rejected** | Accepted (not echoed by `GetJob`) | **Rejected** | **Rejected** | **Rejected** |
+| `description` | **Rejected** | Accepted | Accepted | Accepted | Accepted |
+| `is_publicpath_readonly` | Accepted | Accepted | Accepted | Accepted | Accepted |
+| `is_projectuserspath_readonly` | Accepted (Maintainer only) | **Rejected** | **Rejected** | — | — |
 
-### 各创建 Action 的实发请求体
-
-| Action | 必填 | 可选 |
-| --- | --- | --- |
-| `notebook.CreateNotebook` | `workspace_id`、`name`、`project_id`、`project_name`、`auto_stop`、`allow_ssh`、`mirror_id`、`mirror_url`、`logic_compute_group_id`、`quota_id`、`cpu_count`、`gpu_count`、`memory_size`、`shared_memory_size` | `resource_spec_price`（GPU Notebook 必需）、`task_priority`、`node_id`、`dataset_info[]`、`enable_notification`、`stop_hour` + `stop_minute`、`is_publicpath_readonly`、`is_projectuserspath_readonly` |
-| `train.CreateJobConsole` | `name`、`command`、`framework`、`project_id`、`workspace_id`、`logic_compute_group_id`、`task_priority`、`enable_notification`、`framework_config:[{image_type, image, instance_count, resource_spec_price, cpu, gpu_count, mem_gi, shm_gi?}]` | `max_running_time_ms`、`exclude_nodes[]`、`specified_nodes[]`、`auto_fault_tolerance` + `fault_tolerance_max_retry` + `fault_tolerance_retry_interval_sec`、`dataset_info[]`、`envs[]`、`description`、`reserve_on_success_ms`、`reserve_on_fail_ms`、`is_publicpath_readonly` |
-| `hpc.CreateJobConsole` | `job_name`、`logic_compute_group_id`、`project_id`、`workspace_id`、`enable_notification`、`priority`、`sbatch_script:{number_of_tasks, cpus_per_task, memory_per_cpu, enable_hyper_threading, entrypoint}`、`slurm_cluster_spec:{predef_quota_id, cpu, mem_gi, image, image_type, instance_count, spec_price}` | `dataset_info[]`、`description`、`ttl_after_job_finish_seconds`、`is_publicpath_readonly`，以及 `sbatch_script` 里的运行时长四件套 |
-| `ray.CreateJob` | `name`、`description`、`workspace_id`、`project_id`、`entrypoint`、`task_priority`、`head_node:{mirror_id, image_type, logic_compute_group_id, quota_id, shm_gi?}`、`worker_groups:[{group_name, mirror_id, image_type, logic_compute_group_id, min_replicas, max_replicas, quota_id, shm_gi?}]` | `is_publicpath_readonly` |
-| `inference_serving.CreateServingConsole` | `workspace_id`、`project_id`、`inference_serving_type`、`name`、`logic_compute_group_id`、`model_id`、`model_version`、`mirror_id`、`command`、`port`、`description`、`replicas`、`node_num_per_replica`、`task_priority`、`resource_spec_price` | `custom_domain`、`shm_gi`、`model_source`、`is_publicpath_readonly`、`enable_auto_scaling`。**`queue_id` / `dataset_info` / `envs` / `scale_status` 被拒且没有对应物** |
-
-### 不能靠直觉推的细节
-
-| 项 | 事实 | 后果 |
-| --- | --- | --- |
-| `envs` 元素形状 | 是 `{name, value}`，不是 `{key, value}`（`key` 被拒为 `unknown field`） | **`train.GetJob` 的读投影不回显 `envs`**（容器里明明有变量，读回来是 `[]`），所以不能用读接口核对写了什么 |
-| `is_projectuserspath_readonly` | 只有 notebook 有，而且要项目 Maintainer | 普通成员传了会拿到 `AccessForbidden: only project maintainer can enable project users path readonly mount` |
-| HPC 的最大运行时长不在顶层 | `max_running_time_ms` / `_minutes` 打顶层都是 `unknown field`；它嵌在 `sbatch_script` 里，控制台**同时发两份**：`job_max_time`（`"D-HH:MM:SS"`，即 Slurm `--time`）和 `max_running_time_days` / `_hours` / `_minutes` | `slurm_cluster_spec` 一个都不收 |
-| HPC 的优先级键 | 是 `priority`，不是 `task_priority`，而且必填 | 拼错时答 `priority must be set`（读起来像值缺失而不是名字写错）；**整个键不发**答 `InternalError`——在 transient 名单上，先白烧三次重试再抛出一条像平台故障的错。CLI 宁可自己先报「拿不到优先级」 |
-| `sbatch_script.memory_per_node` 是死字段 | 它会完整 round-trip，但平台脚本生成器只写 `--mem-per-cpu`；只给 `memory_per_node` 会生成空的 `#SBATCH --mem-per-cpu=` 并被 sbatch 拒绝，两个字段同发则答 `InternalError` | 使用 `memory_per_cpu`。**round-trip 通过不足以判定一个字段可用——要一路核到平台真正拿它去生成什么** |
-| Slurm 级字段与节点级规格之间没有校验 | `sbatch_script` 描述程序怎么用节点，`slurm_cluster_spec` 决定申请什么节点，平台和控制台都不交叉校验 | `cpus_per_task` 或其内存乘积超过节点规格会在提交后失败且日志可能为空；总任务需求超过集群容量则可能让 step 长期排队、`steps` 停在 `-/N`。**守门只能放在客户端** |
-| 时间类字段是字符串 | `max_running_time_ms` / `reserve_on_fail_ms` / `reserve_on_success_ms` 发数字被直接拒 | — |
-| `mount_path` / `mounts` 是死字段 | 接受并存储，但容器内不产生对应挂载。元素是 `{real_path, mount_path, volume}`，没有 `read_only`；控制台的 notebook / train 表单也没有自定义挂载入口 | **结论不是「契约未知」，是「这个字段当前没有消费者」** |
-| `hpc` 的 `working_dir` 同类 | `CreateJobConsole` 接受它，但 `GetJob` 读回是 `None`——平台连存都没存。对照组是同一次请求里的 `dataset_info` / `description` / `ttl_after_job_finish_seconds`，三个都完整 round-trip | **写进去读不回来，就不要接** |
-| `train_enable_*` 是 Workspace 能力开关 | 不是可传的参数。`GetTrainScheduleConfig` 返回 `train_enable_pre_check` / `_troubleshoot` / `_specified_nodes` / `_slow_detect` / `_vccl`，控制台据此决定渲染哪些控件。`enable_slow_detect` / `enable_vccl` 虽被 `CreateJobConsole` 接受，但表单里没有对应控件 | **判断某个字段该不该接时，先看这组开关，再看控制台是否真的渲染了控件，两者缺一不可** |
-| `specified_nodes` | discovery 的 `train.CreateJob` 创建 Schema 明确声明 `string[]`，`GetJob` 原样回显；`train_enable_specified_nodes` 决定 Workspace 是否开放。CLI 顶层发送，不塞进 `framework_config`，与 `exclude_nodes` 重名时本地拒绝 | 把它当成 `--nodes` 会混淆“要几个节点”和“必须落在哪些节点”；能力位关闭时发送没有可靠语义 |
-| `notebook` 的第二个 `flatten` | `flatten_mode`（`FLATTEN_OFF` / `FLATTEN_ON` / `FLATTEN_AUTO`，控制台标签「停机自动保存时压平镜像」）属于创建合同，但控制台将该控件禁用 | 和 `train_enable_troubleshoot` 同类，刻意不接。它管的是「停机自动保存」这条独立链路，**不是 `notebook save-image --flatten`** |
-| `resource_spec_price` 的形状 | 嵌套 proto 风格对象 `{cpu_type, cpu_count, gpu_type, gpu_count, memory_size_gib, logic_compute_group_id, quota_id}`；CPU 档位省略 `gpu_type`。由 `quota_id` 那一行的原始 price 对象构造，来源是 [8.11](#811-resource-price--配额目录-) | — |
-| 镜像一律发注册表 URL 或 `mirror_id` | 不发可见名，否则 `无法找到对应镜像`。`image_type` 取 `SOURCE_PUBLIC` / `SOURCE_PRIVATE` / `SOURCE_OFFICIAL` | — |
-| Shared Memory 是实例级资源 | `shm_gi`（train / ray）和 `shared_memory_size`（notebook）不能超过所选 Quota 的实例内存 | — |
-| 可选字段一律「不传就不出现在 body 里」 | 包括两个只读挂载开关——即使只读是更安全的值 | 一个没有指定该选项的创建请求必须与该选项存在之前**逐字节相同**，默认值由平台自己决定 |
+**Key payload rules:**
+- **Omit unset optional fields:** Optional flags (such as `is_publicpath_readonly` or `is_projectuserspath_readonly`) must be omitted from the JSON body when not explicitly set.
+- **HPC runtime limits & priority:** `job_max_time` (`"D-HH:MM:SS"`) and `max_running_time_days`/`_hours`/`_minutes` live inside `sbatch_script`. Top-level `priority` is required (missing `priority` triggers `InternalError`). Never send `sbatch_script.memory_per_node` (broken in the platform script generator); always send `memory_per_cpu`.
+- **Durations as strings:** `train.CreateJobConsole` expects `max_running_time_ms`, `reserve_on_fail_ms`, and `reserve_on_success_ms` as **string** integers.
+- **Images:** Pass registry URLs (`image` / `mirror_url`) or `mirror_id` as required by each Action, never display names.
 
 ---
 
-## 10. `/api/v2` 里不是 Action 的那部分
+## 10. Non-Action `/api/v2` Endpoints (WebSocket PTY & Notebook Proxy)
 
-网关有两种形状（第 6 章）。CLI 用到 REST 那一半的两处，都不是「还没接完」，而是本来就装不进 `?Action=` + JSON 信封里：一个是双向流，一个是反向代理。
+### Instance PTY WebSockets (`job_shell.py`)
 
-| 路径 | 是什么 | 状态 |
-| --- | --- | --- |
-| `/api/v2/train_job/remote_cmd` | 训练任务的 PTY WebSocket | ✅ `job shell` |
-| `/api/v2/hpc_jobs/instances/exec` | HPC 实例的 PTY | ✅ `hpc shell` |
-| `/api/v2/ray_job/instances/exec` | Ray 实例的 PTY | ✅ `ray shell` |
-| `/api/v2/inference_servings/instances/exec` | Serving 实例的 PTY | ✅ `serving shell` |
-| `/api/v2/notebook/lab/{}/` | JupyterLab 入口 | ✅ `notebook ssh` / `proxy-url` 全链路的起点 |
-| `/api/v2/notebook/code/{}/`、`/api/v2/notebook/open/inspire_code/{}` | VS Code 与 inspire_code 的同类入口 | 未接 |
-| `/api/v2/notebook/events/{}` | Notebook 事件流 | 未接（事件走 `notebook` 的 Action） |
-| `/api/v2/file/list` / `create_dir` / `delete` / `update_name`、`/api/v2/file/download/{}` | 文件页的目录操作与下载 | 未接 |
-| `/api/v2/logs/ray_job/download`、`/api/v2/logs/inference_serving/download` | 日志下载 | 未接 |
-| `/api/v2/project/upload_appendix`、`/api/v2/project/{}/download_appendix/{}` | 项目附件 | 未接 |
-| `/api/v2/audit/{}/upload_appendix`、`/api/v2/audit/{}/download_appendix/{}` | 审批附件 | 未接 |
-| `/api/v2/model/{}/version/{}/publish/upload`、`/api/v2/billing/detail/export` | 模型发布上传、账单导出 | 未接 |
-
-**这几条只能拿一个自己的运行中任务去握手验证。** 网关在路由之前先鉴权：普通 GET、带 `Referer` 的 GET、真实的 WebSocket 握手，三种打法对一条确知可用的路径和一条随手编的路径回的都是同一个 401，所以第 7 章那套「按报错区分」的判据在这里整个失效。
-
-### 实例 PTY
-
-四条共用控制台里同一个 URL 构造器，参数走 query string，进容器执行 `command -v bash >/dev/null 2>&1 && exec bash || exec sh`，改窗口大小发 `stty columns N rows M`。构造在 [`job_shell.py`](../../cli/inspire/cli/utils/job_shell.py)，不属于 JSON Action Wrapper。
-
-| Workload | 路由 | 句柄参数 | 实例参数 |
+| Workload | Route | Workload ID Query Param | Instance Query Param |
 | --- | --- | --- | --- |
-| `job` | `train_job/remote_cmd` | `job_id` | `instance_name` |
-| `hpc` | `hpc_jobs/instances/exec` | `job_id` | `instance_id` |
-| `ray` | `ray_job/instances/exec` | `job_id` | `instance_id` |
-| `serving` | `inference_servings/instances/exec` | **`inference_serving_id`** | `instance_id` |
+| `job` | `/api/v2/train_job/remote_cmd` | `job_id` | `instance_name` |
+| `hpc` | `/api/v2/hpc_jobs/instances/exec` | `job_id` | `instance_id` |
+| `ray` | `/api/v2/ray_job/instances/exec` | `job_id` | `instance_id` |
+| `serving` | `/api/v2/inference_servings/instances/exec` | **`inference_serving_id`** | `instance_id` |
 
-**两个参数名逐 Workload 重映射，用错的两种失败都不给报错：**
+### Notebook Lab Redirect & Reverse Proxy
 
-| 组合 | 表现 |
-| --- | --- |
-| `hpc` + `instance_name` | socket 照常 upgrade，然后不返回数据、报错或 close 帧，只是一个永远不说话的 shell |
-| `ray` / `serving` + 错的键 | 握手被拒，回一个光秃秃的 `HTTP/1.1 200 OK` 而不是 101 |
-
-Serving 连句柄都不叫 `job_id`。所以控制台那个按 Workload 重映射参数的动作是必需的，不是风格；`build_remote_cmd_ws_url` 对表里没有的 Workload **直接抛错而不是按类比猜**。
-
-### Notebook Lab 与反向代理
-
-```
-{base_url}/api/v2/notebook/lab/{notebook_id}
-```
-
-GET 它答 `301`，Location 是带 token 的网关地址 `https://<gateway>/ws-…/project-…/user-…/jupyter/<notebook>/<token>/lab`，跟过去就是 JupyterLab 本体。控制台自己的 JupyterLab iframe 指的就是这条路径。CLI 走 `_resolve_direct_lab_url` 跟这一跳，`build_jupyter_proxy_url` 再从**跳完的结果**上派生代理地址。
-
-| 项 | 事实 |
-| --- | --- |
-| `/proxy/{port}/` 只在带 token 的网关地址上有效 | 平台域上的 `{base_url}/api/v2/notebook/lab/{id}/proxy/{port}/` 返回 `404 page not found`。**不存在免 token 的形式** |
-| token 段是敏感信息 | `rtunnel.py` 的 `redact_proxy_url` 专门负责在日志与报错里抹掉它 |
-| 消费者 1 | `inspire notebook proxy-url --port N`——**返回**容器里那个 HTTP 服务（TensorBoard、Gradio、Streamlit、推理端点）的外部地址，不打开任何东西。H100 / H200 受限 Notebook 上默认拒绝，要 `--allow-restricted` |
-| 消费者 2（关键） | **整条 SSH 链路都架在它上面**：受限环境不接受直连，所以在容器里起一个 sshd（默认 22222），再通过这条 HTTP 代理去够它——`_wait_for_rtunnel` 轮询的就是这个带 token 的地址。`notebook ssh` / `scp` / `ssh-config` 以及外部 OpenSSH 工具能用全靠它 |
-| 没有 Action 对应物 | `GetNotebookLab` / `GetLabUrl` / `GetNotebookProxy` / `GetProxyUrl` 均 `InvalidAction`。唯一沾边的 `GetNotebookAccessUrl` 语义不同（给的是 IDE 网关地址，见 [8.4](#84-notebook--交互式建模)），**故意不接** |
-| 与账号级 SSH 公钥无关 | 平台用户中心的公钥注册表管的是账号级公钥；rtunnel 读的是本机 `~/.ssh/*.pub` 并直接注入容器 |
+`GET {base_url}/api/v2/notebook/lab/{notebook_id}` returns `301` with a token-bearing gateway URL (`https://<gateway>/ws-…/project-…/user-…/jupyter/<notebook>/<token>/lab`).
+- Container port proxying (`/proxy/{port}/`) works **only** on that token-bearing gateway URL (used by `notebook proxy-url` and by `rtunnel` SSH bridging on port 22222).
+- Always scrub the embedded gateway token in logs and errors via `redact_proxy_url` in `rtunnel.py`.
 
 ---
 
-## 11. 数据广场 `aip.sii.edu.cn`
+## 11. Dataset Hub (`plaza/`)
 
-**数据广场（上海创智学院数据广场）不是启智的一部分**：不同 host、不同 API 风格、不同 Session，只共用同一套 CAS SSO。启智控制台侧边栏的「数据集」是外链过来的，`qz` 那侧只有 [`dataset.ValidateDataset`](#813-dataset--官方数据集挂载-) 负责把某个版本挂进容器，**检索、目录、版本和权限全在这边**。实现在 [`plaza/`](../../cli/inspire/platform/web/plaza/)。
+The Dataset Hub (`PLAZA_BASE_URL` in [`plaza/core.py`](../../cli/inspire/platform/web/plaza/core.py)) is a separate service sharing CAS SSO (`CAS_BASE_URL`), implemented in [`plaza/`](../../cli/inspire/platform/web/plaza/).
 
-**两套标识符必须分清**：
+### Two Identifier Sets
+- **`datasetCode` / `versionCode`:** User-facing slugs displayed by the CLI and required by `dataset.ValidateDataset` and `--dataset`.
+- **`datasetId` / `versionId`:** Internal numeric IDs used only inside `plaza/` calls (`findDatasets`); never expose them or pass them to mount APIs.
 
-| 标识符 | 是什么 | 出现在哪 |
-| --- | --- | --- |
-| `datasetCode` / `versionCode` | 用户可见身份 | 挂载 API 接受的值、容器路径的组成部分、CLI 唯一展示的东西 |
-| `datasetId` / `versionId` | 数据广场内部句柄 | `findDatasets` 需要它；拿去挂载会被启智拒为「数据集不存在」，所以只活在 resolver 内部 |
+### Three-Step CAS Handshake (Pure HTTP)
+1. `GET {CAS_BASE_URL}/cas/login?service=<urlencode(PLAZA_BASE_URL + "/")>` with the session's `CASTGC` cookie (`allow_redirects=False`) → `302` with `?ticket=ST-…`.
+2. `POST {PLAZA_BASE_URL}/api/base/login` with `{"ticket": "…", "service": PLAZA_BASE_URL + "/"}` → issues `datasets-session` cookie and `userInfo`.
+3. Subsequent requests send `datasets-session` (cached in memory per `(account, session_created_at)`).
 
-### 握手
+### Envelope & Wrapped Endpoints
 
-纯 HTTP，三步，不需要浏览器——CLI 的 Web Session 里已经有 CAS 的 ticket-granting cookie：
+Responses use `{"code": 0, "data": {…}, "msg": "…"}`. Note that `code: 7` is returned for both HTTP 200 record-not-found errors and HTTP 401 unauthenticated errors — trigger session re-handshake **only on HTTP 401**.
 
-```
-1. GET  https://cas.sii.edu.cn/cas/login?service=<urlencode("https://aip.sii.edu.cn/")>
-        带现有 Session 的 CASTGC → 302，Location 上带 ?ticket=ST-…     （必须 allow_redirects=False）
-2. POST https://aip.sii.edu.cn/api/base/login   {"ticket": "…", "service": "https://aip.sii.edu.cn/"}
-        → 下发 `datasets-session` cookie，body 里带 userInfo
-3. 之后的调用带该 cookie；`x-user-id: <userInfo.ID>` 是前端附加头，服务端认证只依赖 Session cookie
-```
-
-| 项 | 事实 |
-| --- | --- |
-| CAS 登录路径 | 是 `/cas/login`，不是 `/login`（后者 404） |
-| 第 1 步必须 `allow_redirects=False` | 否则 ticket 被 SPA 首页消费掉 |
-| 拿不到 ticket | 说明 **CAS 不认这个 cookie**，也就是平台 Session 过期了，不是数据广场的问题 |
-| 缓存策略 | 握手只有两次请求，所以签入后的客户端**只在进程内缓存**，按 `(账号, Session 创建时间)` 作键；刻意不落盘，避免留下过期或跨账号的状态 |
-
-### 信封与错误
-
-```jsonc
-{"code": 0, "data": {…}, "msg": "…"}
-```
-
-**不是 AWS 风格**，`code != 0` 即失败，`msg` 是原因。判定顺序与启智那侧一致：**限流与服务端故障先于读 body**（限流回的是错误页而不是 JSON 信封），然后 3xx / 401，最后才看 `code`。
-
-| 项 | 事实 |
-| --- | --- |
-| HTTP 状态码基本无意义 | **唯一有意义的是 401**：未登录返回 `401 {"code": 7, "msg": "未登录或非法访问"}`，这是重新握手的信号 |
-| `code: 7` 有歧义 | `findDatasets` 的失败和未登录共用它：坏 `datasetId` 是 **HTTP 200** + `查询失败:record not found`，未登录是 **HTTP 401**。**判断要不要重新握手只能看 HTTP 状态码，不能看 `code`** |
-| 401 时的续期顺序 | 重新握手 → 还不行就 `get_web_session(force_refresh=True)` 重建平台 Session 再握手。重新登录很贵，而多数过期只是数据广场自己的 |
-| 限流 | 走与启智同一套 `TransientAPIError` 退避重试 |
-
-### 已封装的端点
-
-| 端点 | 方法 | 输入 | 输出（`data` 内） | CLI |
+| Endpoint | Method | Parameters | Response (`data`) | CLI Consumer |
 | --- | --- | --- | --- | --- |
-| `/api/datasets/getDatasetsList` | GET | query：`page`、`pageSize`、`keyword?`、`tags?` | `{list[], total, page, pageSize}`（同层） | `dataset list`，以及按 code 定位的 resolver |
-| `/api/datasets/findDatasets` | POST | `{datasetId}` | 详情 + `versions[]` | `dataset show` |
-| `/api/datasetTags/getDatasetTagsList` | GET | query：`pageSize`（前端发 999） | `{list[]}` | `dataset tags`，以及 `--tag` 名字→handle 解析 |
-| `datasetApplyApprove/getDatasetApplyList` | GET | `page`、`pageSize`、`keyword?` | 我提交的申请：`id, datasetName, authorityName, applyTime, approveTime, approveUser, applyDescr, state` | `dataset applications` |
-| `datasetApplyApprove/getDatasetApproveList` | GET | 同上加 `role?` | 待我审批，行另含 `applyUser, projectName` | `dataset applications --to-approve` |
-| `datasetApplyApprove/intoApproveById` | GET | `id` | 单条审批详情，含 `datasetCode`；id 不存在时 HTTP 200 + `code != 0`、`msg` 为 `申请记录不存在` | `dataset applications <名字>` |
+| `/api/datasets/getDatasetsList` | `GET` | `page`, `pageSize`, `keyword?`, `tags?` (omit `tags` when empty; comma-separated numeric `tagId`s) | `{list[], total, page, pageSize}` | `dataset list`, code-to-ID resolver |
+| `/api/datasets/findDatasets` | `POST` | `{datasetId}` | Dataset detail + `versions[]` | `dataset show` |
+| `/api/datasetTags/getDatasetTagsList` | `GET` | `pageSize=999` | `{list[]}` (`categoryId`: `0/1` text, `2` image, `3` audio, `4` video, `5` multimodal) | `dataset tags`, `--tag` resolver |
+| `/api/datasetApplyApprove/getDatasetApplyList` | `GET` | `page`, `pageSize`, `keyword?` | `{list[], total}` (`state`: `0` pending, `1` approved, `2` rejected, `-1` withdrawn — note `0` is falsy) | `dataset applications` |
+| `/api/datasetApplyApprove/getDatasetApproveList` | `GET` | `page`, `pageSize`, `keyword?`, `role?` | `{list[], total}` | `dataset applications --to-approve` |
+| `/api/datasetApplyApprove/intoApproveById` | `GET` | `id` | Single application detail including `datasetCode` | `dataset applications <name>` |
 
-| 项 | 事实 |
-| --- | --- |
-| `tags` 是逗号连接的数字 tagId，语义 OR | **空字符串不是通配符**，`tags=""` 返回 0 行。前端在没有选中标签时把这个键整个删掉，客户端也必须省略 |
-| `pageSize` 无上限 | 1000 一次取回全部；`page` 越界返回空 `list` 但 `total` 仍然正确 |
-| `keyword` 连描述一起匹配 | 且不区分大小写，命中范围通常比预期宽——**按 code 定位必须在结果里取精确相等的那一行，不能取第一条**。短 code 可能被别的数据集描述里的散文挤到后面，此时按 `total` 再取一次全量而不是逐页走 |
-| 单位与类型 | `filesSize` 单位是 **MiB**；`dataFormats` 是一个 **JSON 编码的字符串**，不是数组 |
-| `hasPermission` 按账号给 | 为 false 的数据集挂载时报 `2005 无访问权限`；**申请权限只有网页端有入口**，CLI 只能如实报出这一列 |
-| `super` 是数据分级 | `S1` 保密 / `S2` 有限访问控制 / `S3` 学院内部 / `S4` 公开；它不是授权结果。**能否挂载是账号级事实**，必须读取每行的 `hasPermission`，不能从分级推导 |
-| `state` 有四个值 | `active` / `wanted` / `processing` / `error`，版本另有 `downloading` / `pending_upload` |
-| 名字唯一性 | `datasetCode` 全表唯一，标签名也唯一，两个 name→handle 映射都不会歧义 |
-| 版本号不保证是 `vN` | 实际存在 `v1-br`、`2026-07-30`、`v3again`，**不要按序号猜** |
-| 标签分类 `categoryId` | `0` / `1` = 文本（前端把 0 折进文本，客户端照做）、`2` = 图像、`3` = 音频、`4` = 视频、`5` = 多模态 |
-| 申请单的 `state` | `0` 待审批 / `1` 已通过 / `2` 已驳回 / `-1` 已撤回。**`0` 是假值**，用「取真值否则默认」的写法解析会让每一条待审批都渲染成空 |
-
-### 存在但未封装
-
-| 端点 | 为什么不接 |
-| --- | --- |
-| `datasetApplyApprove/datasetApply`（POST） | 会以用户的名义触达真人审批者；除 `datasetId` 外还要求广场侧 `projectId`，而 CLI 没有该项目 resolver。权限申请继续由网页端完成 |
-| `datasetApplyApprove/datasetApprove`（POST） | 同上。**一个端点三用**：`1` 同意、`2` 驳回、`-1` 申请人撤回，其中两种会直接作用于别人提交的申请 |
-| `datasetUserRole/createDatasetUserRole`（POST） | 赋权，同上 |
-| `getDatasetsListUserCenter` | 它是 owner / 角色写操作视图，不是「当前项目的数据集」；行字段还与主目录存在别名差异（SPA 自己在做 `datasetId\|\|id` 归一化）。CLI 不创建或编辑数据集，因此没有消费者 |
-| `getDatasetsWithVersions` | 不带参数即返回全目录的 `[{datasetCode, versions:[{versionCode, versionId}]}]` 扁平索引（**不是信封分页，`data` 直接是数组**）。当前 resolver 已用目录精确匹配加 `findDatasets` 获取详情，没有第二份全量索引消费者 |
-| 其余只读 | `checkHuggingFaceDataset`、`datasetLicenses/{list,detail,download,delete}`、`datasetForks/getDatasetForksList`、`sftpgo/user/files`、`project/{getProjectListByUser,findProject}` |
-| 其余写操作 | `createDatasets`、`createDatasetVersion`、`updateDatasets`(PUT)、`updateDatasetsValue`、`deleteDatasets`、`checkDatasetsName`、`datasetVersion/{updateDatasetVersion,deleteDatasetVersion,confirmComplete}`、`datasetUserRole/*`。CLI 不创建也不编辑数据集，这一族没有动线 |
+Write endpoints (`datasetApply`, `datasetApprove`, `createDatasetUserRole`, dataset creation/mutation) are intentionally not wrapped.
 
 ---
 
-## 12. 输出边界
+## 12. Output Boundaries & Change Acceptance Checklist
 
-| 规则 | 内容 |
-| --- | --- |
-| 原始响应不得穿透 | 平台原始响应不得直接进入公共输出。命令层必须先解析、投影和清洗，Human 与 JSON 输出使用显式 Allowlist |
-| 稳定身份只有 Name 和 Alias | 不透明句柄（`ws-`、`project-`、`lcg-`、`quota_id`、`mirror_id`、`notebook_id`、`job_id`）只存在于 `browser_api/` 和 Session 层 |
-| Notebook 地址例外 | `notebook proxy-url` 走 `format_json(…, preserve_raw={"url"})` 打印完整网关 URL——这个地址的每一段都是平台句柄，默认的 `scrub_raw_ids` 会把它整条洗成 `<redacted>`，洗完就不通了。**代价必须说清楚：这个地址等同于凭据**，内嵌的短期 token 让持有者对该 Notebook 的访问权与你相同，而它会进 Agent 对话记录和 shell 历史 |
-| 明文凭据不进入普通输出 | `file.GetSftpgoConnectionInfo` 的 `auth`：不进日志、不进报错、不进 `--json`、不进文档 |
-| Serving 地址与密钥导出例外 | `serving list/status/create/api` 仅保留已校验 Endpoint；`account api-key export` 支持私有文件与显式 `--stdout`；`run` 注入子进程环境，普通输出永远不含密钥值。详见 8.7 节。 |
-| 内嵌 id 的报错要折掉 | 例如 `Cannot save image of non-running notebook: <id>` |
-
-## 13. 变更验收
-
-改动 Browser API 至少完成：
-
-1. Wrapper 只暴露调用方需要的最小归一化数据，响应解包走 `_v2_result()`，列表键显式声明。
-2. 路由名经过两种写法实测，不是从 discovery `Name` 推导的。
-3. Workspace scoping 放在 discovery 声明的位置，并确认返回的不是 scoping 造成的 `AccessForbidden`。
-4. 命令使用 Name 输入，同名时提供可读候选与 `--pick`；Human 与 JSON 输出使用显式 Allowlist。
-5. 请求失败与「平台返回空」在返回值上可区分，且有测试覆盖失败那一侧；扇出型 Wrapper 还要能表达「部分成功」。
-6. 写操作经过受控验证，**成功以状态真的变了为准，不以响应信封为准**；接受的字段还要能读得回来。
-7. 判某条平台能力「没有对应物」之前，第 7 章的探针跑完整了，并说清本次取样方法的盲区——discovery 缺一条路由不构成结论。
-8. 对应命令 Help、Wrapper 测试和本页表格同步更新。
-
-**未闭合的调查结果不进入本页。**
-
-SDK 异步 HTTP 连接由客户端持有，跨操作复用；独立 `Transport.request_async` 调用仍在 driver 退出时关闭连接。数据广场登录槽由操作视图共享，借用与重置通过共享 workflow 等待，操作结束不关闭所属客户端的会话。SSH 桥接探测子进程和重试暂停使用原生异步 I/O；本地池仍承担 `_ensure_rtunnel_binary` 的检查及必要时的首次下载。
+1. **No raw payload leakage:** Unpack via `_v2_result()`, declare list keys explicitly, and project human and `--json` output through explicit allowlists.
+2. **Name-only public identity:** Never expose opaque handles (`ws-`, `project-`, `lcg-`, `quota_id`, `mirror_id`, `notebook_id`, `job_id`, or embedded IDs in error strings) in CLI output.
+3. **Explicit credential/endpoint exceptions:** Only `notebook proxy-url` (`preserve_raw={"url"}`), `serving list/status/create/api` (validated HTTP(S) `endpoint`), and explicit `account api-key export --stdout` / `run` may cross the redaction boundary.
+4. **Distinguish errors from empty catalogs:** Never turn transport/auth failures into `[]` or `0`, and cover failure paths with unit tests.
+5. **Synchronize docs and tests:** Update Click `--help`, `cli/tests/test_browser_api_*.py`, and the tables in this file together.

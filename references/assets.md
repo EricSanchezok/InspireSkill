@@ -1,34 +1,34 @@
-# 持久资产合同
+# Persistent Assets (`INSPIRE.md`)
 
-需要跨 Agent、成员和会话复用启智平台上的稳定资产时看本页。平台 Project 的负责人、预算和优先级用 `inspire project`查 Live 事实；远端路径形状和挂载隔离见 [`paths.md`](paths.md)。
+Use this guide when maintaining `INSPIRE.md` to share stable remote assets across sessions, agents, and collaborators. For live project owners, budgets, and priorities, run `inspire project`; for shared storage layout and mount isolation, see [`paths.md`](paths.md).
 
-## 不存在仓库绑定
+## No Repository Binding
 
-Inspire CLI 只有账号级持久配置 `~/.inspire/`，不读写仓库级 `./.inspire/`。一个仓库可以在多个 Project、Workspace 和存储池之间切换；每次 Workload 都显式传入 `workspace`、`project`、`group`、`quota` 和 `image`，每次文件操作都显式使用远端绝对路径。
+The CLI stores account configuration under `~/.inspire/` and never reads or writes a repo-local `./.inspire/` directory. A single repository can run across multiple Projects, Workspaces, and storage pools: every workload command takes explicit `workspace`, `project`, `group`, `quota`, and `image` flags, and every file operation uses explicit remote paths.
 
-`INSPIRE.md` 不是 CLI 配置，CLI 不解析它。它只是可选的人类可读资产合同，可以同时描述多个 Project 中的资产。仓库没有需要长期复用的启智资产时不创建空壳文件。
+`INSPIRE.md` is an optional, human-readable asset inventory — the CLI does not parse it. Only create `INSPIRE.md` when a repository actually maintains long-lived remote paths, base images, models, or datasets on the platform.
 
-## 应记录的稳定事实
+## What to Record
 
-| 类别 | 内容 |
+| Category | Details |
 | --- | --- |
-| 适用范围 | 每项资产所属的 Project、适用 Workspace 和存储池 |
-| Canonical Remote Paths | 代码 checkout、公共数据、权重、Checkpoint、模型和交付物的绝对路径 |
-| 真源与同步 | Git 真源、目标分支或 Commit、远端 checkout 的角色和同步方式 |
-| 永久基础设施 | 有当前或明确未来消费者的固定 Notebook、Serving 入口或构建环境 |
-| 资产身份 | 基底镜像、Model / Dataset Revision、Tokenizer / Vocabulary、Manifest、来源、构建配方与消费者 |
-| 复现合同 | 正式运行所需的数据、实现、环境、启动参数、结果和校验身份 |
-| 生命周期 | 删除前的消费者、引用、替代物和唯一副本审计 |
+| Scope | Target Project, Workspace, and storage pool for each asset |
+| Canonical Remote Paths | Absolute `/inspire/...` paths for code checkouts, shared datasets, weights, checkpoints, and deliverables |
+| Code Sync | Git remote, target branch/commit, role of each remote checkout, and sync workflow |
+| Long-Lived Infrastructure | Persistent Notebooks, Serving endpoints, or build environments with active or planned consumers |
+| Asset Identity | Base images, model/dataset revisions, tokenizers, manifests, build recipes, and downstream consumers |
+| Reproducibility | Exact data, image, launch arguments, and validation checkpoints needed to reproduce production runs |
+| Lifecycle & Retention | Active consumers, references, replacements, and whether an asset is the sole copy before deletion |
 
-资产不会仅因体积大、生成昂贵、曾经使用或可以重建而自动成为永久资产；以当前或明确未来消费者、正式引用、替代关系和唯一副本为准。
+Keep an asset in `INSPIRE.md` only if it has active or planned consumers, is referenced by reproducible runs, or is the sole copy of an artifact. Do not treat every large or expensive intermediate output as permanent.
 
-## 不应记录
+## What Not to Record
 
-- 账号配置、密码、代理密钥、Session 或 API Key。
-- 实时资源余量、当前 Workload 状态、动态 URL、排队结果或测速数据。
-- 原始日志、Smoke 输出、实验流水、进度报告和短期计划。
-- 可从 CLI Live 查询、且可能频繁变化的调度条件。
+- Account configs, passwords, proxy credentials, session tokens, or API keys.
+- Live quota availability, workload status, ephemeral URLs, queue positions, or benchmark scratch output.
+- Raw logs, smoke-test transcripts, experiment diaries, or short-term task lists.
+- Scheduling parameters that should be queried live from the CLI.
 
-## 持续维护
+## Upkeep
 
-保存或更换基底镜像、迁移 Canonical Path、新增永久基础设施、注册新 Model 或退役资产时，当场同步 `INSPIRE.md`。发现文档与 Live 查询漂移时以 Live 为准并修正。一次性中转资产用完即删，不写入持久文档。
+Update `INSPIRE.md` immediately when saving or replacing a base image, moving a canonical path, registering a model, or retiring an asset. If `INSPIRE.md` disagrees with live CLI queries, treat live platform state as authoritative and update the file. Delete one-off staging files as soon as their job finishes.

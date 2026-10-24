@@ -1,53 +1,52 @@
-# 官方数据集
+# Official Datasets
 
-挂载数据广场的官方数据集，或判断某个数据集能不能用时看本页。共享盘路径看 [`paths.md`](paths.md)，Workload 创建条件看 [`resources.md`](resources.md)。命令语法以 CLI Help 为准。
+Use this guide when searching the Dataset Hub, checking dataset permissions and versions, or mounting official datasets with `--dataset`. For shared storage paths, see [`paths.md`](paths.md); for workload creation rules, see [`resources.md`](resources.md).
 
-## 1. 数据集不在启智上
+## 1. Two-Stage Workflow
 
-数据广场是独立平台，和启智共用同一套 SSO，但目录、权限和版本都由它自己维护。启智只负责把某个版本挂进容器，不提供检索。
+The Dataset Hub is a separate service that shares single sign-on (SSO) with the compute platform. The Dataset Hub manages the catalog, versions, and access approvals, while the compute platform mounts a validated dataset version into your container at creation time.
 
-因此判断顺序固定：先在数据广场确认数据集和版本存在且当前账号有权限，再回到启智创建 Workload。`inspire dataset` 覆盖前半段，`--dataset` 覆盖后半段。
+Always follow this order:
+1. Query `inspire dataset` to verify that the dataset and version exist and your account has access.
+2. Pass `--dataset <dataset-name>:<version-name>` when creating the workload.
 
-**申请权限只能在数据广场网页端完成。** 提交申请和审批别人的申请都会以你的名义触达真人审批者，CLI 不接这两个动作；能读的只有结果——`inspire dataset applications` 列出自己提交过的申请及其状态（`pending` / `approved` / `rejected` / `withdrawn`），`--to-approve` 换成待自己审批的那一批。看到某条转成 `approved`，就是重新跑 `dataset validate <名字>:<版本>` 的时机。
+**Access requests must be submitted in the Dataset Hub web UI.** Requesting or approving access triggers notifications to human reviewers, so the CLI only provides read-only status tracking via `inspire dataset applications` (your submitted requests: `pending`, `approved`, `rejected`, or `withdrawn`) and `inspire dataset applications --to-approve` (requests awaiting your approval). Once an application turns `approved`, run `inspire dataset validate <name>:<version> --workspace <workspace>` to confirm mount readiness.
 
-## 2. 数据集用名字寻址，不用数字 ID
+## 2. Address by Name, Never Numeric ID
 
-数据广场内部有 `datasetId` / `versionId` 两个数字主键，它们**不能**用于挂载：填数字会被拒为 `数据集不存在`。挂载认的是数据集名和版本名，也就是 `inspire dataset list` 和 `inspire dataset show` 展示的那两列。
+The Dataset Hub uses internal numeric `datasetId` and `versionId` keys, but the mount API rejects numeric IDs (`数据集不存在`). Always use the slug and version string shown by `inspire dataset list` and `inspire dataset show`:
 
-| 概念 | 形状 | 举例 |
+| Field | Format | Example |
 | --- | --- | --- |
-| 数据集名 | 小写短横线字符串 | `pixabay-81k` |
-| 版本名 | 自由格式，不保证是 `vN` | `v0`、`v1-br`、`2026-07-30` |
-| 挂载参数 | `<数据集名>:<版本名>` | `--dataset pixabay-81k:v0` |
+| Dataset Name | Lowercase hyphenated slug | `pixabay-81k` |
+| Version Name | Free-form string (not always `vN`) | `v0`, `v1-br`, `2026-07-30` |
+| Mount Spec | `<dataset-name>:<version-name>` | `--dataset pixabay-81k:v0` |
 
-版本名不要按 `v0` / `v1` 递增去猜，一律从 `dataset show` 读。
+Never guess version names (`v0`, `v1`, etc.); read them from `inspire dataset show <name>`.
 
-## 3. 列表里的四个判断字段
+## 3. Catalog Fields & Filtering
 
-| 字段 | 含义 | 影响 |
+| Field | Meaning | Impact |
 | --- | --- | --- |
-| Access | 当前账号是否有权挂载 | 无权限时创建会被拒为 `无访问权限`；申请进度用 `dataset applications` 看 |
-| State | 数据集状态 | `active` 可用；`processing` / `wanted` / `error` 都不可挂载 |
-| Grade | 数据分级 `S2` / `S3` / `S4` | 决定合规要求，不影响命令 |
-| Tags | 领域标签 | 分属文本、图像、音频、视频、多模态五种模态；当前全量用 `dataset tags` 列 |
+| `Access` | Whether the current account can mount the dataset | Creation fails with `无访问权限` if false; check `dataset applications` for pending requests |
+| `State` | Dataset state | Only `active` is mountable; `processing`, `wanted`, and `error` cannot be mounted |
+| `Grade` | Security classification (`S2`, `S3`, `S4`) | Informational compliance tier; does not directly grant or deny mount access |
+| `Tags` | Modality and domain tags | Grouped across text, image, audio, video, and multimodal; list valid tag names with `dataset tags` |
 
-版本另有自己的状态，`downloading` 和 `pending_upload` 表示数据还没落盘。数据集 `active` 不代表每个版本都可用。
+Individual versions also have their own state: `downloading` and `pending_upload` indicate that files are not yet on disk even if the parent dataset is `active`.
 
-`--keyword` 同时匹配名称和描述，命中范围通常比预期宽；`--tag` 可重复，多个标签之间是 OR，接受的标签名用 `inspire dataset tags` 列出——标签是固定的中文词，猜不出来。
+`--keyword` matches both dataset names and descriptions (case-insensitive). `--tag` can be repeated (combined with OR) and requires exact tag names from `inspire dataset tags`.
 
-## 4. 挂载语义
+## 4. Mounting Semantics
 
-`notebook`、`job` 和 `hpc` 的 `create` 支持 `--dataset`，可重复。`ray` 和 `serving` 不支持——平台直接拒绝该字段，网页端对应表单也没有这一项，需要数据时走共享盘。
+- **Supported workloads:** `notebook create`, `job create`, and `hpc create` accept repeatable `--dataset <name>:<version>` flags (and `dataset` entries in batch files).
+- **Unsupported workloads:** `ray` and `serving` reject dataset mounts at the platform level; stage data on shared storage instead.
+- **Container mount path:** Mounted read-only at `/inspire/dataset/<dataset-name>/<version-name>` without consuming project shared-storage quota.
+- **Pre-flight validation:** The platform validates every dataset mount before creating a workload and aborts the entire creation if any mount fails. Use `inspire dataset validate <spec>... --workspace <workspace>` to test mounts beforehand.
+- **Batch deduplication:** Within a single `job`, `hpc`, or `notebook` batch run, successful `(workspace, dataset, version)` validations are cached in memory for subsequent items in that invocation; failed validations are not cached.
+- **Inspecting mounts:** `notebook status`, `job status`, and `hpc status` display all mounted datasets and their container paths.
 
-挂载点固定为 `/inspire/dataset/<数据集名>/<版本名>`，**只读**，也不占项目共享盘配额。
-
-建好之后用 `notebook status` / `job status` / `hpc status` 回看挂了哪些数据集和它们的容器路径，不必回网页确认。
-
-创建前平台会逐条校验并解析真实存储路径，任何一条不通就整体失败，不会先建出一个缺数据的 Workload。想在创建之前单独确认，用 `inspire dataset validate ... --workspace <workspace>`，它按条给出拒绝原因：数据集不存在、版本不存在，或当前账号在该 Workspace 无访问权限。
-
-Job / HPC / Notebook Batch 里，同一个 `(Workspace, 数据集名, 版本名)` 的成功校验只在本次命令中请求一次并供后续条目复用；失败不会缓存，下一条仍会重试。这个快照不跨命令，也不替代之后创建请求里的真实挂载路径。
-
-## 5. 最短闭环
+## 5. Minimal Example
 
 ```bash
 inspire dataset list --keyword pixabay
@@ -57,4 +56,4 @@ inspire notebook create -n prep --workspace CPU资源空间 --project <project> 
   --group CPU资源-2 -q 0,4,32 --image <image> --dataset pixabay-81k:v0
 ```
 
-`dataset show` 的每个版本行直接给出可粘贴的 `--dataset` 值和容器内路径，不需要自己拼。
+Each version row in `inspire dataset show` prints the exact `--dataset` value and container path ready to copy.
